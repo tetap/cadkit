@@ -1,0 +1,1691 @@
+import {
+  type AABB,
+  type CapabilityReport,
+  type Disposer,
+  type EditorConfig,
+  type EditorConfigPatch,
+  type EditorLifecycle,
+  type Entity,
+  type EntityId,
+  type EventName,
+  type EditorEvents,
+  type FramePhase,
+  type GroupEntity,
+  type InteractionConfig,
+  type LengthUnit,
+  type LayerId,
+  type ScreenPoint,
+  type SelectionHitMode,
+  type TextEntity,
+  type ImageEntity,
+  createEntityId,
+  createEventBus,
+  createGroupId,
+  isValidAABB,
+  mergeEditorConfig,
+  screenPoint,
+  worldPoint,
+  IDENTITY_TRANSFORM,
+} from '@cadkit/types'
+import {
+  Camera2D,
+  applyAffineToEntity,
+  entityWorldBounds,
+  offsetEntities,
+  RASTER_DPI,
+  SVG_DPI,
+  rasterPixelsToWorld,
+  resolveWorldMatrix,
+  scale as scaleMatrix,
+  svgUserUnitsToWorld,
+  type LengthUnit as GeomUnit,
+  type OffsetOptions,
+} from '@cadkit/geometry'
+import {
+  CadDocument,
+  ChunkStore,
+  layerFillFromStroke,
+  type Layer,
+} from '@cadkit/document'
+import {
+  AddEntityCommand,
+  BatchCommand,
+  GroupCommand,
+  HistoryStack,
+  MutateEntitiesCommand,
+  RemoveEntityCommand,
+  UngroupCommand,
+  UpdateEntityCommand,
+} from '@cadkit/commands'
+import type { DocumentChange } from '@cadkit/document'
+import { SceneProjector } from '@cadkit/scene'
+import type { FrameMetrics, RendererBackend } from '@cadkit/render-core'
+import { WebGPURenderer } from '@cadkit/render-webgpu'
+import {
+  HandleOverlay,
+  SelectionSet,
+  TextOverlay,
+  ToolManager,
+  buildTransformHandles,
+  anchorsToCubicPoints,
+  createBuiltinTools,
+  type AlignGuide,
+  type PreviewPrimitive,
+  type TextDraftState,
+  type ToolName,
+} from '@cadkit/interaction'
+import { ImeTextEditor } from '@cadkit/text'
+import { AssetRegistry, createFilterId, type FilterOp } from '@cadkit/assets'
+import { parseSvg, exportSvg } from '@cadkit/io-svg'
+import { importDxf } from '@cadkit/io-dxf'
+import { detectCapabilities, ensureEditorHost, resolveView } from '@cadkit/platform-web'
+import { WORKER_ABI } from '@cadkit/worker-runtime'
+import {
+  DARK_RULER_THEME,
+  DARK_GRID_STYLE,
+  DEFAULT_GRID_STYLE,
+  LIGHT_RULER_THEME,
+  RulerOverlay,
+  buildGridGeometry,
+} from '@cadkit/guides'
+import { PluginHost, type EditorPlugin } from './plugin.js'
+
+export interface CreateEditorOptions extends EditorConfigPatch {}
+
+export class Editor {
+  readonly config: EditorConfig
+  readonly events = createEventBus()
+  readonly document: CadDocument
+  readonly camera = new Camera2D()
+  readonly selection = new SelectionSet()
+  readonly history: HistoryStack
+  readonly scene: SceneProjector
+  readonly chunks = new ChunkStore()
+  readonly assets = new AssetRegistry()
+  readonly tools: ToolManager
+  readonly import: {
+    svg: (source: string, opts?: { signal?: AbortSignal }) => Promise<void>
+    dxf: (source: string | File, opts?: { signal?: AbortSignal }) => Promise<void>
+    image: (source: File | Blob | string) => Promise<EntityId | null>
+  }
+  readonly export: {
+    svg: () => string
+    json: () => string
+  }
+
+  private lifecycle: EditorLifecycle = 'created'
+  private host: HTMLElement | null = null
+  private canvas: HTMLCanvasElement | null = null
+  private renderer: RendererBackend | null = null
+  private rulers: RulerOverlay | null = null
+  private handleOverlay: HandleOverlay | null = null
+  private capabilities: CapabilityReport | null = null
+  private raf = 0
+  private disposed = false
+  private readonly plugins = new PluginHost(this)
+  private lastMetrics: FrameMetrics | null = null
+  private resizeObserver: ResizeObserver | null = null
+  private displayUnit: LengthUnit
+  private worldUnit: LengthUnit
+  private gridVisible: boolean
+  /** Raster import DPI (CSS default 96). */
+  private rasterDpi = RASTER_DPI
+  /** SVG unitless user-unit DPI (default 72). */
+  private svgDpi = SVG_DPI
+  private alignGuides: AlignGuide[] = []
+  private preview: PreviewPrimitive = { kind: 'none' }
+  private previewLayer: HTMLDivElement | null = null
+  private textOverlay: TextOverlay | null = null
+  private ime: ImeTextEditor | null = null
+  private placeImageHandler: ((world: { x: number; y: number }) => void) | null = null
+
+  private constructor(config: EditorConfig) {
+    this.config = config
+    this.worldUnit = config.document.unit
+    this.displayUnit = config.document.displayUnit
+    this.gridVisible = config.guides.grid
+    this.document = new CadDocument(config.document)
+    this.history = new HistoryStack(this.document)
+    this.scene = new SceneProjector(this.document, config.performance)
+    const ix = config.interaction
+    this.tools = new ToolManager({
+      doc: this.document,
+      camera: this.camera,
+      scene: this.scene,
+      selection: this.selection,
+      selectionHitMode: ix.selectionHitMode,
+      snap: {
+        enabled: ix.snapEnabled,
+        pixelTolerance: ix.pixelTolerance,
+        worldPerPixel: 1,
+        gridSize: ix.gridSize,
+        alignEnabled: ix.alignEnabled,
+        showDistances: ix.showDistances,
+        angleStepDeg: ix.angleStepDeg,
+        panDamping: ix.panDamping,
+      },
+      ortho: false,
+      commitChange: (change) => this.commitSceneChange(change),
+      addEntity: (entity) => {
+        const change = this.history.execute(new AddEntityCommand(entity))
+        this.commitSceneChange(change)
+      },
+      applyPatches: (patches, coalesceKey) => {
+        const change = this.history.execute(new MutateEntitiesCommand(patches, coalesceKey))
+        this.commitSceneChange(change)
+      },
+      removeEntities: (ids) => {
+        const cmds = ids.map((id) => new RemoveEntityCommand(id))
+        const change = this.history.execute(new BatchCommand(cmds))
+        this.commitSceneChange(change)
+        for (const id of ids) this.selection.remove(id)
+        this.events.emit('selection:change', { ids: this.selection.toArray() })
+      },
+      onEntityCreated: () => this.requestRender(),
+      onSelectionEdited: () => {
+        this.events.emit('selection:change', { ids: this.selection.toArray() })
+        this.refreshHandles()
+        this.requestRender()
+      },
+      onCameraChanged: () => {
+        const s = this.camera.getState()
+        this.events.emit('camera:change', {
+          zoom: s.zoom,
+          center: { x: s.x, y: s.y, __space: 'world' },
+        })
+        this.refreshHandles()
+        this.refreshPreview()
+        this.refreshTextOverlay()
+        this.requestRender()
+      },
+      onToolChanged: (tool) => {
+        this.events.emit('tool:change', { tool })
+        this.syncToolCursor()
+      },
+      onAlignGuides: (guides) => {
+        this.alignGuides = guides
+        this.refreshHandles()
+      },
+      onPreview: (preview) => {
+        this.preview = preview
+        this.refreshPreview()
+      },
+      beginTextEdit: (opts) => {
+        this.ime?.dispose()
+        const zoom = this.camera.getState().zoom
+        const worldFontSize = opts.worldFontSize ?? opts.fontSize / Math.max(zoom, 1e-6)
+        const applyDraft = (content: string, selStart: number, selEnd: number) => {
+          const a = Math.max(0, Math.min(selStart, content.length))
+          const b = Math.max(0, Math.min(selEnd, content.length))
+          this.textOverlay?.setDraft({
+            entityId: opts.entityId ?? null,
+            content,
+            caret: b,
+            selStart: a,
+            selEnd: b,
+            world: { x: opts.world.x, y: opts.world.y },
+            fontSize: worldFontSize,
+            fontFamily: opts.fontFamily ?? 'ui-sans-serif, system-ui, sans-serif',
+            color: opts.color ?? '#111827',
+            align: opts.align,
+            widthFactor: opts.widthFactor,
+            rotation: opts.rotation,
+            path: opts.path,
+          })
+          this.refreshTextOverlay()
+          // Selection frame tracks draft metrics while IME is live.
+          this.refreshHandles()
+          const caretScreen = this.textOverlay?.getCaretScreen(this.camera)
+          if (caretScreen && this.ime?.isActive()) {
+            const rect = this.canvas?.getBoundingClientRect()
+            this.ime.moveTo(
+              (rect?.left ?? 0) + caretScreen.x,
+              (rect?.top ?? 0) + caretScreen.y + caretScreen.fontSizePx,
+              caretScreen.fontSizePx,
+            )
+          }
+          this.syncToolCursor()
+        }
+        // Seed draft so click→caret hit-testing can run before IME starts.
+        applyDraft(opts.initial, opts.initial.length, opts.initial.length)
+        let caret = opts.initial.length
+        if (opts.clickScreen && this.textOverlay) {
+          caret = this.textOverlay.caretIndexAt(opts.clickScreen, this.camera)
+        }
+        applyDraft(opts.initial, caret, caret)
+        const caretScreen = this.textOverlay?.getCaretScreen(this.camera)
+        const rect = this.canvas?.getBoundingClientRect()
+        const clientX = (rect?.left ?? 0) + (caretScreen?.x ?? opts.screenX)
+        const clientY =
+          (rect?.top ?? 0) +
+          (caretScreen ? caretScreen.y + caretScreen.fontSizePx : opts.screenY)
+        this.ime = new ImeTextEditor({
+          container: document.body,
+          onChange: (text) => {
+            const sel = this.ime?.getSelection()
+            applyDraft(text, sel?.start ?? text.length, sel?.end ?? text.length)
+          },
+          onSelectionChange: (sel) => {
+            applyDraft(sel.text, sel.start, sel.end)
+          },
+          onCommit: (text) => {
+            this.textOverlay?.setDraft(null)
+            opts.onCommit(text)
+            this.refreshTextOverlay()
+            this.syncToolCursor()
+            this.requestRender()
+          },
+          onCancel: () => {
+            this.textOverlay?.setDraft(null)
+            opts.onCancel()
+            this.refreshTextOverlay()
+            this.syncToolCursor()
+            this.requestRender()
+          },
+        })
+        this.ime.start(
+          opts.initial,
+          clientX,
+          clientY,
+          caretScreen?.fontSizePx ?? opts.fontSize,
+          {
+            fontFamily: opts.fontFamily,
+            color: opts.color,
+            width: opts.widthPx,
+            textAlign: opts.align,
+          },
+          { start: caret, end: caret },
+        )
+      },
+      cancelTextEdit: () => this.ime?.stop(false),
+      commitTextEdit: () => this.ime?.stop(true),
+      isTextEditing: () => this.ime?.isActive() ?? false,
+      retainTextEditFocus: () => this.ime?.retainFocus(),
+      hitTestTextEdit: (screen) =>
+        this.textOverlay?.hitTestDraft(screen, this.camera) ?? false,
+      textCaretIndexAt: (screen) =>
+        this.textOverlay?.caretIndexAt(screen, this.camera) ?? 0,
+      setTextSelection: (start, end) => this.ime?.setSelection(start, end),
+      getTextSelection: () => this.ime?.getSelection() ?? { start: 0, end: 0 },
+      placeImageAt: (world) => this.placeImageHandler?.(world),
+    })
+    this.tools.registerBuiltinShapes(createBuiltinTools())
+    this.import = {
+      svg: (source, opts) => this.importSvg(source, opts),
+      dxf: (source, opts) => this.importDxf(source, opts),
+      image: async (source: File | Blob | string) => this.importImage(source),
+    }
+    this.export = {
+      svg: () => exportSvg(this.document.getEntities()),
+      json: () => JSON.stringify(this.document.toJSON(), null, 2),
+    }
+  }
+
+  static async create(options: CreateEditorOptions = {}): Promise<Editor> {
+    const config = mergeEditorConfig(options)
+    const editor = new Editor(config)
+    await editor.initialize()
+    return editor
+  }
+
+  getLifecycle(): EditorLifecycle {
+    return this.lifecycle
+  }
+
+  getCapabilities(): CapabilityReport | null {
+    return this.capabilities
+  }
+
+  getWorkerAbi() {
+    return WORKER_ABI
+  }
+
+  getMetrics(): FrameMetrics | null {
+    return this.lastMetrics
+  }
+
+  getDisplayUnit(): LengthUnit {
+    return this.displayUnit
+  }
+
+  getWorldUnit(): LengthUnit {
+    return this.worldUnit
+  }
+
+  /** Switch ruler/grid display unit without rewriting geometry. */
+  setDisplayUnit(unit: LengthUnit): void {
+    this.displayUnit = unit
+    this.config.document.displayUnit = unit
+    this.rulers?.setUnits(this.worldUnit as GeomUnit, unit as GeomUnit)
+    this.events.emit('camera:change', {
+      zoom: this.camera.getState().zoom,
+      center: { x: this.camera.getState().x, y: this.camera.getState().y, __space: 'world' },
+    })
+    this.requestRender()
+  }
+
+  setGridVisible(visible: boolean): void {
+    this.gridVisible = visible
+    this.config.guides.grid = visible
+    this.requestRender()
+  }
+
+  setRulersVisible(visible: boolean): void {
+    this.config.guides.rulers = visible
+    this.rulers?.setVisible(visible)
+    this.layoutChrome()
+    this.requestRender()
+  }
+
+  getGridVisible(): boolean {
+    return this.gridVisible
+  }
+
+  getRulersVisible(): boolean {
+    return this.config.guides.rulers
+  }
+
+  /** DPI used when placing imported bitmaps into world units. */
+  getRasterDpi(): number {
+    return this.rasterDpi
+  }
+
+  setRasterDpi(dpi: number): void {
+    if (!(dpi > 0) || !Number.isFinite(dpi)) return
+    this.rasterDpi = dpi
+  }
+
+  /** DPI used when converting unitless SVG user units into world units. */
+  getSvgDpi(): number {
+    return this.svgDpi
+  }
+
+  setSvgDpi(dpi: number): void {
+    if (!(dpi > 0) || !Number.isFinite(dpi)) return
+    this.svgDpi = dpi
+  }
+
+  /** `unbounded` = infinite viewport grid; `page` = finite work area. */
+  setWorkAreaMode(mode: 'unbounded' | 'page'): void {
+    this.config.guides.workArea.mode = mode
+    this.gridCacheKey = ''
+    this.cachedGrid = null
+    this.layoutChrome()
+    if (mode === 'page') this.fitView()
+    else this.requestRender()
+  }
+
+  /** Page size in document/storage units (used when mode is `page`). */
+  setWorkAreaSize(width: number, height: number, originX = 0, originY = 0): void {
+    const wa = this.config.guides.workArea
+    wa.width = Math.max(1e-6, width)
+    wa.height = Math.max(1e-6, height)
+    wa.originX = originX
+    wa.originY = originY
+    this.gridCacheKey = ''
+    this.cachedGrid = null
+    if (wa.mode === 'page') this.fitView()
+    else this.requestRender()
+  }
+
+  getWorkArea() {
+    return { ...this.config.guides.workArea }
+  }
+
+  // —— Layers ——————————————————————————————————————————————————————————————
+
+  getLayers(): Layer[] {
+    return this.document.getLayers()
+  }
+
+  getActiveLayerId(): LayerId {
+    return this.document.getDefaultLayerId()
+  }
+
+  setActiveLayer(id: LayerId): boolean {
+    const ok = this.document.setDefaultLayerId(id)
+    if (ok) this.requestRender()
+    return ok
+  }
+
+  addLayer(input?: { name?: string; color?: string }): Layer {
+    const layer = this.document.addLayer(input)
+    this.document.setDefaultLayerId(layer.id)
+    this.scene.notifyLayersChanged()
+    this.requestRender()
+    return layer
+  }
+
+  updateLayer(
+    id: LayerId,
+    patch: Partial<Pick<Layer, 'name' | 'visible' | 'locked' | 'color'>>,
+  ): Layer | null {
+    const prev = this.document.getLayer(id)
+    const layer = this.document.updateLayer(id, patch)
+    if (!layer) return null
+    if (patch.color && patch.color !== prev?.color) {
+      this.recolorLayerEntities(id, patch.color)
+    }
+    this.scene.notifyLayersChanged()
+    this.refreshTextOverlay()
+    this.requestRender()
+    return layer
+  }
+
+  removeLayer(id: LayerId): boolean {
+    const ok = this.document.removeLayer(id)
+    if (!ok) return false
+    this.scene.rebuildIndex()
+    this.requestRender()
+    return true
+  }
+
+  /** Move current selection onto a layer and tint with that layer's color. */
+  moveSelectionToLayer(layerId: LayerId): void {
+    const layer = this.document.getLayer(layerId)
+    if (!layer) return
+    const ids = this.selection.toArray()
+    if (!ids.length) return
+    const color = layer.color ?? '#32cd79'
+    for (const id of ids) {
+      const e = this.document.getEntity(id)
+      if (!e || e.type === 'group' || e.type === 'image') {
+        if (e && e.type !== 'group') this.updateEntity(id, { layerId } as Partial<Entity>)
+        continue
+      }
+      const hasFill =
+        !!e.style.fill &&
+        e.style.fill !== 'none' &&
+        e.style.fill !== 'transparent' &&
+        !/00$/i.test(e.style.fill)
+      let fill = e.style.fill
+      if (e.type === 'text') fill = color
+      else if (hasFill) fill = layerFillFromStroke(color)
+      this.updateEntity(
+        id,
+        {
+          layerId,
+          style: { ...e.style, stroke: color, fill },
+        } as Partial<Entity>,
+        'layer-move',
+      )
+    }
+    this.events.emit('selection:change', { ids })
+    this.requestRender()
+  }
+
+  private recolorLayerEntities(layerId: LayerId, color: string): void {
+    for (const e of this.document.getEntities()) {
+      if (e.layerId !== layerId || e.type === 'image' || e.type === 'group') continue
+      const hasFill =
+        !!e.style.fill &&
+        e.style.fill !== 'none' &&
+        e.style.fill !== 'transparent' &&
+        !/00$/i.test(e.style.fill)
+      const fill =
+        e.type === 'text' ? color : hasFill ? layerFillFromStroke(color) : e.style.fill
+      this.document.update(e.id, {
+        style: { ...e.style, stroke: color, fill },
+      } as Partial<Entity>)
+    }
+    this.scene.rebuildIndex()
+  }
+
+  on<K extends EventName>(name: K, handler: (payload: EditorEvents[K]) => void): Disposer {
+    return this.events.on(name, handler)
+  }
+
+  use(plugin: EditorPlugin): void {
+    this.plugins.use(plugin)
+  }
+
+  add(entity: Entity): EntityId {
+    const change = this.history.execute(new AddEntityCommand(entity))
+    if (change && !Array.isArray(change)) this.scene.applyChange(change)
+    this.requestRender()
+    return entity.id
+  }
+
+  remove(id: EntityId): void {
+    const change = this.history.execute(new RemoveEntityCommand(id))
+    if (change && !Array.isArray(change)) this.scene.applyChange(change)
+    this.selection.remove(id)
+    this.requestRender()
+  }
+
+  group(ids: EntityId[]): EntityId {
+    const groupId = createGroupId()
+    const group: GroupEntity = {
+      id: groupId as unknown as EntityId,
+      type: 'group',
+      groupId,
+      layerId: this.document.getDefaultLayerId(),
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      children: [...ids],
+    }
+    const change = this.history.execute(new GroupCommand(ids, group))
+    this.commitSceneChange(change)
+    this.selection.set([group.id])
+    this.events.emit('selection:change', { ids: this.selection.toArray() })
+    this.refreshHandles()
+    this.requestRender()
+    return group.id
+  }
+
+  ungroup(groupId: EntityId): EntityId[] {
+    const group = this.document.getEntity(groupId)
+    const children = group?.type === 'group' ? [...group.children] : []
+    const change = this.history.execute(new UngroupCommand(groupId))
+    this.commitSceneChange(change)
+    this.selection.set(children.filter((id) => !!this.document.getEntity(id)))
+    this.events.emit('selection:change', { ids: this.selection.toArray() })
+    this.refreshHandles()
+    this.requestRender()
+    return children
+  }
+
+  setSelectionHitMode(mode: SelectionHitMode): void {
+    this.config.interaction.selectionHitMode = mode
+    this.tools.setSelectionHitMode(mode)
+  }
+
+  getSelectionHitMode(): SelectionHitMode {
+    return this.tools.getSelectionHitMode()
+  }
+
+  setInteraction(patch: Partial<InteractionConfig>): void {
+    Object.assign(this.config.interaction, patch)
+    const ix = this.config.interaction
+    this.tools.context.selectionHitMode = ix.selectionHitMode
+    this.tools.context.snap = {
+      ...this.tools.context.snap,
+      enabled: ix.snapEnabled,
+      pixelTolerance: ix.pixelTolerance,
+      gridSize: ix.gridSize,
+      alignEnabled: ix.alignEnabled,
+      showDistances: ix.showDistances,
+      angleStepDeg: ix.angleStepDeg,
+      panDamping: ix.panDamping,
+    }
+  }
+
+  getInteraction(): InteractionConfig {
+    return { ...this.config.interaction }
+  }
+
+  select(ids: EntityId[]): void {
+    this.selection.set(ids)
+    this.events.emit('selection:change', { ids: this.selection.toArray() })
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  /** Activate a sticky tool (`select` | `pan` | `line` | …). */
+  setTool(name: ToolName): void {
+    this.tools.activate(name)
+  }
+
+  getTool(): ToolName {
+    return this.tools.getActive()
+  }
+
+  fitView(): void {
+    const wa = this.config.guides.workArea
+    const bounds =
+      wa.mode === 'page'
+        ? {
+            minX: wa.originX,
+            minY: wa.originY,
+            maxX: wa.originX + wa.width,
+            maxY: wa.originY + wa.height,
+          }
+        : this.document.getDocumentBounds()
+    this.camera.fitBounds(bounds)
+    this.events.emit('camera:change', {
+      zoom: this.camera.getState().zoom,
+      center: {
+        x: this.camera.getState().x,
+        y: this.camera.getState().y,
+        __space: 'world',
+      },
+    })
+    this.requestRender()
+  }
+
+  undo(): void {
+    if (this.history.undo()) {
+      this.syncSelectionAfterHistory()
+      this.scene.rebuildIndex()
+      this.refreshHandles()
+      this.requestRender()
+    }
+  }
+
+  redo(): void {
+    if (this.history.redo()) {
+      this.syncSelectionAfterHistory()
+      this.scene.rebuildIndex()
+      this.refreshHandles()
+      this.requestRender()
+    }
+  }
+
+  canUndo(): boolean {
+    return this.history.canUndo()
+  }
+
+  canRedo(): boolean {
+    return this.history.canRedo()
+  }
+
+  updateEntity(id: EntityId, patch: Partial<Entity>, coalesceKey?: string): void {
+    const change = this.history.execute(new UpdateEntityCommand(id, patch, coalesceKey))
+    this.commitSceneChange(change)
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  applyStyle(id: EntityId, style: Entity['style']): void {
+    const prev = this.document.getEntity(id)
+    if (!prev) return
+    this.updateEntity(id, { style: { ...prev.style, ...style } })
+  }
+
+  zoomTo(factor: number, screen?: ScreenPoint): void {
+    const s =
+      screen ??
+      screenPoint(this.camera.getState().viewportWidth / 2, this.camera.getState().viewportHeight / 2)
+    this.camera.zoomAt(s, factor)
+    this.events.emit('camera:change', {
+      zoom: this.camera.getState().zoom,
+      center: { x: this.camera.getState().x, y: this.camera.getState().y, __space: 'world' },
+    })
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  /** Show a transient geometry preview (tools / offset dialog). */
+  setPreview(preview: PreviewPrimitive): void {
+    this.preview = preview
+    this.refreshPreview()
+  }
+
+  clearPreview(): void {
+    this.preview = { kind: 'none' }
+    this.refreshPreview()
+  }
+
+  /**
+   * Offset selected entities into new closed polylines (undoable batch).
+   * Returns created entity ids.
+   */
+  offsetSelection(options: OffsetOptions): EntityId[] {
+    const ids = this.selection.toArray()
+    if (!ids.length) return []
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    const entities = ids
+      .map((id) => this.document.getEntity(id))
+      .filter((e): e is Entity => !!e && e.type !== 'group')
+    const contours = offsetEntities(entities, options, lookup)
+    if (!contours.length) return []
+
+    const created: Entity[] = contours.map((c) => ({
+      id: createEntityId('polyline'),
+      type: 'polyline' as const,
+      layerId: this.document.getDefaultLayerId(),
+      style: { stroke: '#2563eb', strokeWidth: 1, fill: 'none' },
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      points: c.points,
+      closed: c.closed,
+    }))
+    const change = this.history.execute(
+      new BatchCommand(created.map((entity) => new AddEntityCommand(entity))),
+    )
+    this.commitSceneChange(change)
+    const newIds = created.map((e) => e.id)
+    this.selection.set(newIds)
+    this.events.emit('selection:change', { ids: newIds })
+    this.clearPreview()
+    this.refreshHandles()
+    this.requestRender()
+    return newIds
+  }
+
+  /** Preview offset contours for the current selection without committing. */
+  previewOffsetSelection(options: OffsetOptions): number {
+    const ids = this.selection.toArray()
+    if (!ids.length) {
+      this.clearPreview()
+      return 0
+    }
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    const entities = ids
+      .map((id) => this.document.getEntity(id))
+      .filter((e): e is Entity => !!e && e.type !== 'group')
+    const contours = offsetEntities(entities, options, lookup)
+    if (!contours.length) {
+      this.clearPreview()
+      return 0
+    }
+    this.setPreview({
+      kind: 'paths',
+      paths: contours.map((c) => ({
+        points: c.points.map((p) => worldPoint(p.x, p.y)),
+        closed: c.closed,
+      })),
+    })
+    return contours.length
+  }
+
+  /** Platform / playground binds file picker & drag-drop here. */
+  setPlaceImageHandler(handler: ((world: { x: number; y: number }) => void) | null): void {
+    this.placeImageHandler = handler
+  }
+
+  /** Drop selection ids that no longer exist after undo/redo. */
+  private syncSelectionAfterHistory(): void {
+    const next = this.selection.toArray().filter((id) => !!this.document.getEntity(id))
+    this.selection.set(next)
+    this.events.emit('selection:change', { ids: next })
+  }
+
+  requestRender(): void {
+    if (this.disposed || this.raf) return
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0
+      const coasting = this.tools.tick()
+      this.renderFrame()
+      if (coasting) this.requestRender()
+    })
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return
+    this.setLifecycle('disposing')
+    this.disposed = true
+    if (this.raf) cancelAnimationFrame(this.raf)
+    this.resizeObserver?.disconnect()
+    this.canvas?.removeEventListener('pointerdown', this.onPointerDown)
+    this.canvas?.removeEventListener('pointermove', this.onPointerMove)
+    this.canvas?.removeEventListener('pointerup', this.onPointerUp)
+    this.canvas?.removeEventListener('pointerleave', this.onPointerLeave)
+    this.canvas?.removeEventListener('dblclick', this.onDoubleClick)
+    this.canvas?.removeEventListener('wheel', this.onWheel)
+    window.removeEventListener('keydown', this.onKeyDown)
+    window.removeEventListener('keyup', this.onKeyUp)
+    this.plugins.dispose()
+    this.handleOverlay?.dispose()
+    this.handleOverlay = null
+    this.textOverlay?.dispose()
+    this.textOverlay = null
+    this.previewLayer?.remove()
+    this.previewLayer = null
+    this.ime?.dispose()
+    this.ime = null
+    this.rulers?.dispose()
+    this.rulers = null
+    this.renderer?.dispose()
+    this.renderer = null
+    this.setLifecycle('disposed')
+  }
+
+  private async initialize(): Promise<void> {
+    this.setLifecycle('initializing')
+    this.capabilities = await detectCapabilities()
+    if (!this.capabilities.webgpu) {
+      throw new Error('WebGPU is required. CADKit no longer ships a Canvas2D renderer.')
+    }
+
+    const canvas = resolveView(this.config.view)
+    this.canvas = canvas
+    this.host = ensureEditorHost(canvas)
+    this.layoutChrome()
+
+    if (this.config.guides.rulers) {
+      this.rulers = new RulerOverlay(this.host, {
+        size: this.config.guides.rulerSize,
+        worldUnit: this.worldUnit as GeomUnit,
+        displayUnit: this.displayUnit as GeomUnit,
+        theme: this.config.theme === 'dark' ? DARK_RULER_THEME : LIGHT_RULER_THEME,
+        visible: true,
+      })
+    }
+
+    this.renderer = new WebGPURenderer()
+    await this.renderer.initialize(canvas)
+    this.renderer.setTextureResolver?.({
+      getBitmap: (id) => this.assets.get(id as never)?.bitmap ?? null,
+      getStatus: (id) => this.assets.get(id as never)?.status,
+    })
+    this.renderer.setMemoryBudget?.(this.config.performance.memoryBudgetMB)
+    this.handleOverlay = new HandleOverlay(this.host)
+    this.textOverlay = new TextOverlay(this.host)
+    this.bindInput()
+    this.bindResize()
+    this.syncToolCursor()
+    this.setLifecycle('ready')
+    this.setLifecycle('running')
+    this.requestRender()
+  }
+
+  private layoutChrome(): void {
+    if (!this.canvas || !this.host) return
+    const gutter = this.config.guides.rulers ? this.config.guides.rulerSize : 0
+    const pageMode = this.config.guides.workArea.mode === 'page'
+    const canvasBg =
+      this.config.theme === 'dark'
+        ? pageMode
+          ? '#0a0d11'
+          : '#0f1419'
+        : pageMode
+          ? '#e8eaed'
+          : '#ffffff'
+    Object.assign(this.canvas.style, {
+      position: 'absolute',
+      left: `${gutter}px`,
+      top: `${gutter}px`,
+      right: 'auto',
+      bottom: 'auto',
+      // A canvas is a replaced element: width/height:auto keeps its 300×150
+      // intrinsic size even with left/right set. Give it an explicit CSS box.
+      width: `calc(100% - ${gutter}px)`,
+      height: `calc(100% - ${gutter}px)`,
+      display: 'block',
+      background: canvasBg,
+    } as Partial<CSSStyleDeclaration>)
+    // Preview/handles/text share canvas space (not full host including ruler gutters).
+    if (this.previewLayer) {
+      this.alignOverlayToCanvas(this.previewLayer)
+    }
+    this.alignTextOverlayToCanvas()
+  }
+
+  /** Canvas position relative to the overlay host, including borders/fractional layout. */
+  private getCanvasBoxInHost(): {
+    left: number
+    top: number
+    right: number
+    bottom: number
+  } {
+    if (!this.canvas || !this.host) return { left: 0, top: 0, right: 0, bottom: 0 }
+    const host = this.host.getBoundingClientRect()
+    const canvas = this.canvas.getBoundingClientRect()
+    return {
+      left: canvas.left - host.left,
+      top: canvas.top - host.top,
+      right: host.right - canvas.right,
+      bottom: host.bottom - canvas.bottom,
+    }
+  }
+
+  private alignOverlayToCanvas(el: HTMLElement): void {
+    const box = this.getCanvasBoxInHost()
+    el.style.inset = `${box.top}px ${box.right}px ${box.bottom}px ${box.left}px`
+  }
+
+  private alignTextOverlayToCanvas(): void {
+    const box = this.getCanvasBoxInHost()
+    this.textOverlay?.setCanvasBounds(box.left, box.top, box.right, box.bottom)
+  }
+
+  private bindInput(): void {
+    if (!this.canvas) return
+    this.canvas.style.touchAction = 'none'
+    this.canvas.addEventListener('pointerdown', this.onPointerDown)
+    this.canvas.addEventListener('pointermove', this.onPointerMove)
+    this.canvas.addEventListener('pointerup', this.onPointerUp)
+    this.canvas.addEventListener('pointerleave', this.onPointerLeave)
+    this.canvas.addEventListener('dblclick', this.onDoubleClick)
+    this.canvas.addEventListener('wheel', this.onWheel, { passive: false })
+    window.addEventListener('keydown', this.onKeyDown)
+    window.addEventListener('keyup', this.onKeyUp)
+  }
+
+  private commitSceneChange(change: DocumentChange | DocumentChange[] | null): void {
+    if (!change) return
+    if (Array.isArray(change)) {
+      for (const c of change) this.scene.applyChange(c)
+    } else {
+      this.scene.applyChange(change)
+    }
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private refreshHandles(): void {
+    if (!this.handleOverlay || !this.canvas || !this.host) return
+    const box = this.getCanvasBoxInHost()
+    const offset = { left: box.left, top: box.top }
+    const draft = this.textOverlay?.getDraft() ?? null
+    const draftBox = draft ? this.boundsForTextDraft(draft) : null
+    let handles = this.tools.getSelectionHandles()
+    let frameBox = this.tools.getSelectionFrame()?.box ?? null
+    let frameRotation = this.tools.getSelectionFrame()?.rotation ?? 0
+    if (draft && draftBox) {
+      frameBox = draftBox
+      frameRotation = draft.rotation ?? frameRotation
+      handles = buildTransformHandles(draftBox, this.camera, frameRotation)
+    }
+    this.handleOverlay.update(handles, this.camera, offset, frameBox, frameRotation)
+    this.handleOverlay.updateHover(this.tools.getHoverFrame(), this.camera, offset)
+    this.handleOverlay.updateMarquee(this.tools.getMarqueeAABB(), this.camera, offset)
+    this.handleOverlay.updateAlignGuides(this.alignGuides, this.camera, offset)
+    // Mirror selection AABB onto rulers (X/Y span highlights).
+    this.rulers?.setSelectionBounds(frameBox)
+    this.rulers?.update(this.camera)
+  }
+
+  /** World AABB for the in-progress text draft (selection frame while editing). */
+  private boundsForTextDraft(draft: TextDraftState): AABB | null {
+    const live = draft.entityId ? this.document.getEntity(draft.entityId) : undefined
+    const fake: TextEntity = {
+      id: (draft.entityId ?? ('__text_draft__' as EntityId)) as EntityId,
+      type: 'text',
+      layerId: live && live.type === 'text' ? live.layerId : this.document.getDefaultLayerId(),
+      parentId: live?.parentId,
+      style: live?.style ?? { fill: draft.color },
+      transform: live?.transform ?? IDENTITY_TRANSFORM,
+      version: 1,
+      content: draft.content,
+      position: { x: draft.world.x, y: draft.world.y },
+      fontFamily: draft.fontFamily,
+      fontSize: draft.fontSize,
+      align: draft.align,
+      widthFactor: draft.widthFactor,
+      rotation: draft.rotation,
+      path: draft.path,
+    }
+    const lookup = (id: EntityId) => {
+      if (draft.entityId && id === draft.entityId) return fake
+      return this.document.getEntity(id)
+    }
+    const box = entityWorldBounds(fake, resolveWorldMatrix(fake, lookup))
+    return isValidAABB(box) ? box : null
+  }
+
+  private bindResize(): void {
+    if (!this.host) return
+    let didInitialPageFit = false
+    const apply = () => {
+      if (!this.canvas || !this.host) return
+      this.layoutChrome()
+      const hostRect = this.host.getBoundingClientRect()
+      // Camera / picking must match the canvas CSS box (pointer uses the same rect).
+      const canvasRect = this.canvas.getBoundingClientRect()
+      const width = Math.max(1, canvasRect.width)
+      const height = Math.max(1, canvasRect.height)
+      const dpr = this.config.dpr ?? window.devicePixelRatio ?? 1
+      this.camera.setViewport(width, height)
+      this.renderer?.resize(width, height, dpr)
+      this.rulers?.resize(hostRect.width, hostRect.height, dpr)
+      // Page mode needs a real viewport before fit — otherwise 100×100 stays ~100 CSS px.
+      if (
+        !didInitialPageFit &&
+        this.config.guides.workArea.mode === 'page' &&
+        width > 32 &&
+        height > 32
+      ) {
+        this.fitView()
+        didInitialPageFit = true
+      }
+      this.refreshHandles()
+      this.refreshPreview()
+      this.refreshTextOverlay()
+      this.requestRender()
+    }
+    apply()
+    this.resizeObserver = new ResizeObserver(apply)
+    this.resizeObserver.observe(this.host)
+  }
+
+  private readonly onPointerDown = (ev: PointerEvent) => {
+    this.tools.setModifierKeys({ shiftKey: ev.shiftKey })
+    const screen = this.toScreen(ev)
+    const world = this.camera.screenToWorld(screen)
+    this.tools.pointerDown(screen, world, ev.button)
+    // Keep capture for drag tools; release when IME text editing starts.
+    if (this.ime?.isActive()) {
+      try {
+        this.canvas?.releasePointerCapture?.(ev.pointerId)
+      } catch {
+        /* ignore */
+      }
+    } else {
+      this.canvas?.setPointerCapture?.(ev.pointerId)
+    }
+    this.events.emit('pointer:down', { screen, world, button: ev.button })
+    this.syncToolCursor()
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private readonly onPointerMove = (ev: PointerEvent) => {
+    this.tools.setModifierKeys({ shiftKey: ev.shiftKey })
+    const screen = this.toScreen(ev)
+    const world = this.camera.screenToWorld(screen)
+    this.tools.pointerMove(screen, world)
+    this.events.emit('pointer:move', { screen, world })
+    this.syncToolCursor()
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private readonly onPointerLeave = () => {
+    this.tools.clearHover()
+    this.syncToolCursor()
+    this.refreshHandles()
+  }
+
+  private readonly onPointerUp = (ev: PointerEvent) => {
+    try {
+      this.canvas?.releasePointerCapture?.(ev.pointerId)
+    } catch {
+      /* ignore */
+    }
+    this.tools.setModifierKeys({ shiftKey: ev.shiftKey })
+    const screen = this.toScreen(ev)
+    const world = this.camera.screenToWorld(screen)
+    this.tools.pointerUp(screen, world, ev.button)
+    this.events.emit('pointer:up', { screen, world, button: ev.button })
+    this.events.emit('selection:change', { ids: this.selection.toArray() })
+    this.syncToolCursor()
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private readonly onDoubleClick = (ev: MouseEvent) => {
+    ev.preventDefault()
+    const screen = this.toScreen(ev)
+    const world = this.camera.screenToWorld(screen)
+    this.tools.doubleClick(screen, world)
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private readonly onWheel = (ev: WheelEvent) => {
+    ev.preventDefault()
+    const screen = this.toScreen(ev)
+    const factor = ev.deltaY > 0 ? 0.9 : 1.1
+    this.camera.zoomAt(screen, factor)
+    this.events.emit('camera:change', {
+      zoom: this.camera.getState().zoom,
+      center: { x: this.camera.getState().x, y: this.camera.getState().y, __space: 'world' },
+    })
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private readonly onKeyDown = (ev: KeyboardEvent) => {
+    const target = ev.target as HTMLElement | null
+    // IME / form fields must receive keys (including Space) without tool shortcuts.
+    if (
+      this.ime?.isActive() ||
+      (target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          target.classList?.contains('cadkit-ime')))
+    ) {
+      return
+    }
+    if (ev.key === ' ' || ev.code === 'Space') {
+      if (!ev.repeat) {
+        ev.preventDefault()
+        this.tools.setModifierKeys({ spaceKey: true })
+        this.syncToolCursor()
+      }
+      return
+    }
+    if (ev.key === 'Shift') {
+      this.tools.setModifierKeys({ shiftKey: true })
+      return
+    }
+    // Tool shortcuts (Figma-like): V select, H pan, L line
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      const k = ev.key.toLowerCase()
+      if (k === 'v') {
+        ev.preventDefault()
+        this.setTool('select')
+        return
+      }
+      if (k === 'h') {
+        ev.preventDefault()
+        this.setTool('pan')
+        return
+      }
+      const toolMap: Record<string, ToolName> = {
+        v: 'select',
+        h: 'pan',
+        l: 'line',
+        r: 'rectangle',
+        o: 'ellipse',
+        c: 'circle',
+        p: 'polyline',
+        b: 'pen',
+        w: 'brush',
+        t: 'text',
+        i: 'image',
+      }
+      const tool = toolMap[k]
+      if (tool) {
+        try {
+          this.setTool(tool)
+          ev.preventDefault()
+          return
+        } catch {
+          /* tool not registered */
+        }
+      }
+    }
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'z') {
+      ev.preventDefault()
+      if (ev.shiftKey) this.redo()
+      else this.undo()
+      return
+    }
+    this.tools.setModifierKeys({ shiftKey: ev.shiftKey })
+    this.tools.keyDown(ev.key)
+    if (ev.key === 'Delete' || ev.key === 'Backspace') ev.preventDefault()
+    this.refreshHandles()
+    this.requestRender()
+  }
+
+  private readonly onKeyUp = (ev: KeyboardEvent) => {
+    if (this.ime?.isActive()) return
+    const target = ev.target as HTMLElement | null
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      return
+    }
+    if (ev.key === ' ' || ev.code === 'Space') {
+      this.tools.setModifierKeys({ spaceKey: false })
+      this.syncToolCursor()
+      return
+    }
+    if (ev.key === 'Shift') {
+      this.tools.setModifierKeys({ shiftKey: false })
+    }
+  }
+
+  private refreshTextOverlay(): void {
+    if (!this.textOverlay) return
+    this.alignTextOverlayToCanvas()
+    this.textOverlay.update(this.document.getEntities(), this.camera)
+  }
+
+  private syncToolCursor(): void {
+    if (!this.canvas) return
+    if (this.ime?.isActive()) {
+      this.canvas.style.cursor = 'text'
+      return
+    }
+    const effective = this.tools.getEffectiveTool()
+    if (effective === 'pan') {
+      this.canvas.style.cursor = this.tools.isPanning() ? 'grabbing' : 'grab'
+      return
+    }
+    const cross: ToolName[] = [
+      'line',
+      'rectangle',
+      'ellipse',
+      'circle',
+      'polyline',
+      'pen',
+      'brush',
+      'text',
+      'image',
+    ]
+    if (cross.includes(effective)) {
+      this.canvas.style.cursor = 'crosshair'
+      return
+    }
+    // Select tool: pointer when hovering a pickable element.
+    this.canvas.style.cursor = this.tools.getHoverId() ? 'pointer' : 'default'
+  }
+
+  private refreshPreview(): void {
+    if (!this.host) return
+    if (!this.previewLayer) {
+      this.previewLayer = document.createElement('div')
+      this.previewLayer.className = 'cadkit-preview'
+      Object.assign(this.previewLayer.style, {
+        position: 'absolute',
+        pointerEvents: 'none',
+        zIndex: '2',
+        overflow: 'hidden',
+      } as Partial<CSSStyleDeclaration>)
+      this.host.appendChild(this.previewLayer)
+    }
+    this.alignOverlayToCanvas(this.previewLayer)
+    const layer = this.previewLayer
+    layer.innerHTML = ''
+    const p = this.preview
+    if (p.kind === 'none') return
+    // worldToScreen is canvas-local; previewLayer is aligned to the canvas (not host/rulers).
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    Object.assign(svg.style, { position: 'absolute', inset: '0', width: '100%', height: '100%' })
+    const stroke = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    stroke.setAttribute('fill', 'none')
+    stroke.setAttribute('stroke', '#60a5fa')
+    stroke.setAttribute('stroke-width', '1')
+    stroke.setAttribute('stroke-dasharray', '4 3')
+    const toS = (x: number, y: number) => {
+      const s = this.camera.worldToScreen({ x, y, __space: 'world' })
+      return `${s.x},${s.y}`
+    }
+    if (p.kind === 'line') {
+      stroke.setAttribute('d', `M ${toS(p.a.x, p.a.y)} L ${toS(p.b.x, p.b.y)}`)
+    } else if (p.kind === 'rect') {
+      const a = toS(p.minX, p.minY)
+      const b = toS(p.maxX, p.minY)
+      const c = toS(p.maxX, p.maxY)
+      const d = toS(p.minX, p.maxY)
+      stroke.setAttribute('d', `M ${a} L ${b} L ${c} L ${d} Z`)
+    } else if (p.kind === 'ellipse') {
+      const c = this.camera.worldToScreen({ x: p.cx, y: p.cy, __space: 'world' })
+      const rx = p.rx * this.camera.getState().zoom
+      const ry = p.ry * this.camera.getState().zoom
+      const ell = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse')
+      ell.setAttribute('cx', String(c.x))
+      ell.setAttribute('cy', String(c.y))
+      ell.setAttribute('rx', String(Math.max(0.5, rx)))
+      ell.setAttribute('ry', String(Math.max(0.5, ry)))
+      ell.setAttribute('fill', 'none')
+      ell.setAttribute('stroke', '#60a5fa')
+      ell.setAttribute('stroke-width', '1')
+      ell.setAttribute('stroke-dasharray', '4 3')
+      svg.appendChild(ell)
+      layer.appendChild(svg)
+      return
+    } else if (p.kind === 'polyline' && p.points.length) {
+      if (p.points.length === 1) {
+        const a = p.points[0]!
+        const s = this.camera.worldToScreen({ x: a.x, y: a.y, __space: 'world' })
+        const mark = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+        mark.setAttribute('cx', String(s.x))
+        mark.setAttribute('cy', String(s.y))
+        mark.setAttribute('r', '3.5')
+        mark.setAttribute('fill', '#60a5fa')
+        mark.setAttribute('stroke', '#2563eb')
+        mark.setAttribute('stroke-width', '1')
+        svg.appendChild(mark)
+        layer.appendChild(svg)
+        return
+      }
+      const d = p.points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${toS(pt.x, pt.y)}`).join(' ')
+      stroke.setAttribute('d', d + (p.closed ? ' Z' : ''))
+      // Keep last vertex visible while drawing freehand.
+      const last = p.points[p.points.length - 1]!
+      const tip = this.camera.worldToScreen({ x: last.x, y: last.y, __space: 'world' })
+      const mark = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      mark.setAttribute('cx', String(tip.x))
+      mark.setAttribute('cy', String(tip.y))
+      mark.setAttribute('r', '2.5')
+      mark.setAttribute('fill', '#60a5fa')
+      svg.appendChild(mark)
+    } else if (p.kind === 'paths') {
+      for (const path of p.paths) {
+        if (!path.points.length) continue
+        const el = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+        el.setAttribute('fill', 'none')
+        el.setAttribute('stroke', '#60a5fa')
+        el.setAttribute('stroke-width', '1.5')
+        const d =
+          path.points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${toS(pt.x, pt.y)}`).join(' ') +
+          (path.closed !== false ? ' Z' : '')
+        el.setAttribute('d', d)
+        svg.appendChild(el)
+      }
+      layer.appendChild(svg)
+      return
+    } else if (p.kind === 'pen') {
+      this.paintPenPreview(svg, p, toS)
+      layer.appendChild(svg)
+      return
+    }
+    svg.appendChild(stroke)
+    layer.appendChild(svg)
+  }
+
+  private paintPenPreview(
+    svg: SVGSVGElement,
+    p: Extract<PreviewPrimitive, { kind: 'pen' }>,
+    toS: (x: number, y: number) => string,
+  ): void {
+    const anchors = p.placing ? [...p.anchors, p.placing] : [...p.anchors]
+    if (p.cursor && anchors.length) {
+      anchors.push({
+        point: p.cursor,
+        handleIn: null,
+        handleOut: null,
+      })
+    }
+    const cubic = anchorsToCubicPoints(anchors, false)
+    if (cubic.length >= 4) {
+      let d = `M ${toS(cubic[0]!.x, cubic[0]!.y)}`
+      for (let i = 1; i + 2 < cubic.length; i += 3) {
+        d += ` C ${toS(cubic[i]!.x, cubic[i]!.y)} ${toS(cubic[i + 1]!.x, cubic[i + 1]!.y)} ${toS(cubic[i + 2]!.x, cubic[i + 2]!.y)}`
+      }
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      path.setAttribute('d', d)
+      path.setAttribute('fill', 'none')
+      path.setAttribute('stroke', '#60a5fa')
+      path.setAttribute('stroke-width', '1.25')
+      path.setAttribute('stroke-dasharray', p.cursor || p.placing ? '4 3' : 'none')
+      svg.appendChild(path)
+    } else if (anchors.length === 1) {
+      // Single anchor — no segment yet.
+    }
+
+    const drawHandle = (anchor: { x: number; y: number }, tip: { x: number; y: number }) => {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+      const a = this.camera.worldToScreen({ x: anchor.x, y: anchor.y, __space: 'world' })
+      const b = this.camera.worldToScreen({ x: tip.x, y: tip.y, __space: 'world' })
+      line.setAttribute('x1', String(a.x))
+      line.setAttribute('y1', String(a.y))
+      line.setAttribute('x2', String(b.x))
+      line.setAttribute('y2', String(b.y))
+      line.setAttribute('stroke', '#93c5fd')
+      line.setAttribute('stroke-width', '1')
+      svg.appendChild(line)
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      dot.setAttribute('cx', String(b.x))
+      dot.setAttribute('cy', String(b.y))
+      dot.setAttribute('r', '2.5')
+      dot.setAttribute('fill', '#fff')
+      dot.setAttribute('stroke', '#2563eb')
+      dot.setAttribute('stroke-width', '1')
+      svg.appendChild(dot)
+    }
+
+    const show = p.placing ? [...p.anchors, p.placing] : p.anchors
+    for (const a of show) {
+      if (a.handleIn) drawHandle(a.point, a.handleIn)
+      if (a.handleOut) drawHandle(a.point, a.handleOut)
+      const s = this.camera.worldToScreen({ x: a.point.x, y: a.point.y, __space: 'world' })
+      const mark = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+      mark.setAttribute('cx', String(s.x))
+      mark.setAttribute('cy', String(s.y))
+      mark.setAttribute('r', p.closedHint && a === p.anchors[0] ? '5' : '3.5')
+      mark.setAttribute('fill', '#60a5fa')
+      mark.setAttribute('stroke', '#2563eb')
+      mark.setAttribute('stroke-width', '1')
+      svg.appendChild(mark)
+    }
+  }
+
+  private toScreen(ev: Pick<MouseEvent, 'clientX' | 'clientY'>): ScreenPoint {
+    const rect = this.canvas!.getBoundingClientRect()
+    return screenPoint(ev.clientX - rect.left, ev.clientY - rect.top)
+  }
+
+  private gridCacheKey = ''
+  private cachedGrid:
+    | {
+        vertices: Float32Array
+        vertexCount: number
+        fillVertices?: Float32Array
+        fillVertexCount?: number
+        camX: number
+        camY: number
+        zoom: number
+      }
+    | null = null
+
+  private renderFrame(): void {
+    if (!this.renderer) return
+    this.emitPhase('beforeUpdate')
+    this.emitPhase('update')
+    this.emitPhase('bounds')
+    this.emitPhase('index')
+    this.emitPhase('cull')
+    const built = this.scene.build(this.camera, this.selection.asReadonly())
+    const { items, stats, skipGeometryUpload, mode, revision, lodBin } = built
+    this.scene.consumeDirtyMeta()
+    const state = this.camera.getState()
+    const workArea = this.config.guides.workArea
+    const pageMode = workArea.mode === 'page'
+    const gridStyle = {
+      ...(this.config.theme === 'dark' ? DARK_GRID_STYLE : DEFAULT_GRID_STYLE),
+      visible: this.gridVisible,
+    }
+    const pageFill: [number, number, number, number] =
+      this.config.theme === 'dark' ? [0.12, 0.14, 0.18, 1] : [1, 1, 1, 1]
+    // Cache key excludes camera x/y — screen-space grid rebuilds when the view moves.
+    const key = [
+      Math.round(state.viewportWidth),
+      Math.round(state.viewportHeight),
+      lodBin,
+      this.worldUnit,
+      this.displayUnit,
+      this.config.theme,
+      workArea.mode,
+      workArea.width,
+      workArea.height,
+      workArea.originX,
+      workArea.originY,
+      this.gridVisible ? 1 : 0,
+    ].join('|')
+
+    let skipGridUpload = false
+    let grid = this.cachedGrid
+    if (this.gridVisible || pageMode) {
+      const camMoved =
+        !grid ||
+        grid.zoom !== state.zoom ||
+        Math.hypot((grid.camX - state.x) * state.zoom, (grid.camY - state.y) * state.zoom) > 0.01
+      if (grid && this.gridCacheKey === key && !camMoved) {
+        skipGridUpload = true
+      } else {
+        const builtGrid = buildGridGeometry(
+          this.camera,
+          state.viewportWidth,
+          state.viewportHeight,
+          this.worldUnit as GeomUnit,
+          this.displayUnit as GeomUnit,
+          gridStyle,
+          workArea,
+          pageFill,
+        )
+        // Copy out of subarray views so later mutations / uploads own the bytes.
+        grid = {
+          vertices: new Float32Array(builtGrid.vertices),
+          vertexCount: builtGrid.vertexCount,
+          fillVertices: builtGrid.fillVertices
+            ? new Float32Array(builtGrid.fillVertices)
+            : undefined,
+          fillVertexCount: builtGrid.fillVertexCount,
+          camX: state.x,
+          camY: state.y,
+          zoom: state.zoom,
+        }
+        this.cachedGrid = grid
+        this.gridCacheKey = key
+        skipGridUpload = false
+      }
+    } else {
+      grid = null
+      this.cachedGrid = null
+      this.gridCacheKey = ''
+    }
+
+    this.rulers?.update(this.camera)
+    this.refreshTextOverlay()
+
+    this.emitPhase('prepare')
+    this.emitPhase('render')
+    const outsideClear =
+      this.config.theme === 'dark'
+        ? pageMode
+          ? '#0a0d11'
+          : '#0f1419'
+        : pageMode
+          ? '#e8eaed'
+          : '#ffffff'
+    this.lastMetrics = this.renderer.render({
+      camera: this.camera,
+      items,
+      selected: this.selection.asReadonly(),
+      stats,
+      clearColor: outsideClear,
+      skipGeometryUpload,
+      skipGridUpload,
+      sceneRevision: revision,
+      lodBin,
+      mode,
+      textures: {
+        getBitmap: (id) => this.assets.get(id as never)?.bitmap ?? null,
+        getStatus: (id) => this.assets.get(id as never)?.status,
+      },
+      grid:
+        grid && (grid.vertexCount > 0 || (grid.fillVertexCount ?? 0) > 0)
+          ? {
+              vertices: grid.vertices,
+              vertexCount: grid.vertexCount,
+              fillVertices: grid.fillVertices,
+              fillVertexCount: grid.fillVertexCount,
+            }
+          : undefined,
+    })
+    this.emitPhase('afterRender')
+    this.events.emit('metrics', {
+      frameMs: this.lastMetrics.frameMs,
+      drawCalls: this.lastMetrics.drawCalls,
+      visibleCount: this.lastMetrics.visibleCount,
+      uploadBytes: this.lastMetrics.uploadBytes,
+      memoryMB: this.lastMetrics.memoryMB,
+    })
+  }
+
+  private emitPhase(phase: FramePhase): void {
+    this.events.emit('frame:phase', { phase, dt: 0 })
+  }
+
+  private setLifecycle(next: EditorLifecycle): void {
+    const from = this.lifecycle
+    this.lifecycle = next
+    this.events.emit('lifecycle:change', { from, to: next })
+  }
+
+  private async importSvg(source: string, opts?: { signal?: AbortSignal }): Promise<void> {
+    this.events.emit('document:session', { state: 'loading' })
+    const result = await parseSvg(source, { signal: opts?.signal })
+    // Unitless SVG user units → inches via svgDpi (default 72), then into world units.
+    const uuScale = svgUserUnitsToWorld(1, this.worldUnit as GeomUnit, this.svgDpi)
+    const entities = result.entities.map((e) => scaleImportedEntity(e, uuScale))
+    const change = this.document.addMany(entities)
+    this.scene.applyChange(change)
+    this.events.emit('import:progress', {
+      loaded: entities.length,
+      warnings: result.warnings.length,
+    })
+    this.events.emit('document:session', { state: 'active' })
+    this.fitView()
+  }
+
+  private async importImage(source: File | Blob | string): Promise<EntityId | null> {
+    try {
+      const asset =
+        typeof source === 'string'
+          ? await this.assets.importUrl(source)
+          : await this.assets.importFile(source)
+      const cam = this.camera.getState()
+      // Raster pixels → physical size at rasterDpi (default 96), then into world units.
+      const worldW = rasterPixelsToWorld(asset.width, this.worldUnit as GeomUnit, this.rasterDpi)
+      const worldH = rasterPixelsToWorld(asset.height, this.worldUnit as GeomUnit, this.rasterDpi)
+      const entity: ImageEntity = {
+        id: createEntityId('image'),
+        type: 'image',
+        layerId: this.document.getDefaultLayerId(),
+        style: {},
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        assetId: asset.id,
+        href: asset.href,
+        naturalWidth: asset.width,
+        naturalHeight: asset.height,
+        width: worldW,
+        height: worldH,
+        origin: { x: cam.x - worldW / 2, y: cam.y - worldH / 2 },
+        preserveAspectRatio: true,
+        filters: [],
+      }
+      this.add(entity)
+      this.select([entity.id])
+      return entity.id
+    } catch (err) {
+      console.error(err)
+      return null
+    }
+  }
+
+  /** Mutate image filter stack (undoable). */
+  setImageFilters(id: EntityId, filters: FilterOp[]): void {
+    this.updateEntity(id, { filters } as Partial<Entity>)
+  }
+
+  addImageFilter(id: EntityId, filter: Omit<FilterOp, 'id'> & { id?: string }): void {
+    const e = this.document.getEntity(id)
+    if (!e || e.type !== 'image') return
+    const next = [...(e.filters ?? []), { ...filter, id: filter.id ?? createFilterId() }]
+    this.setImageFilters(id, next as FilterOp[])
+  }
+
+  private async importDxf(source: string | File, opts?: { signal?: AbortSignal }): Promise<void> {
+    this.events.emit('document:session', { state: 'loading' })
+    const text = typeof source === 'string' ? source : await source.text()
+    let loaded = 0
+    let warnings = 0
+    for await (const chunk of importDxf(text, {
+      signal: opts?.signal,
+      chunkSize: 5000,
+      targetUnit: this.worldUnit,
+    })) {
+      if (chunk.documentUnit) {
+        // Keep storage unit; expose detected unit via progress consumer if needed
+      }
+      const change = this.document.addMany(chunk.entities)
+      this.scene.applyChange(change)
+      loaded += chunk.entities.length
+      warnings += chunk.warnings.length
+      if (loaded > 100_000) {
+        for (const part of ChunkStore.partition(chunk.entities, 10_000)) this.chunks.put(part)
+      }
+      this.events.emit('import:progress', { loaded, warnings })
+      this.requestRender()
+    }
+    this.events.emit('document:session', { state: 'active' })
+    this.fitView()
+  }
+}
+
+/**
+ * Uniformly scale an imported entity from source units into world units.
+ * Scales geometry via affine map, plus strokeWidth / fontSize / arc radius.
+ */
+function scaleImportedEntity(entity: Entity, factor: number): Entity {
+  if (!(factor > 0) || Math.abs(factor - 1) < 1e-12) return entity
+  let next = applyAffineToEntity(entity, scaleMatrix(factor, factor))
+  if (next.style.strokeWidth != null) {
+    next = {
+      ...next,
+      style: { ...next.style, strokeWidth: next.style.strokeWidth * factor },
+    }
+  }
+  if (next.type === 'text') {
+    const path =
+      next.path?.kind === 'arc'
+        ? { ...next.path, radius: next.path.radius * factor }
+        : next.path
+    next = { ...next, fontSize: next.fontSize * factor, path }
+  }
+  return next
+}
+
+export async function createEditor(options?: CreateEditorOptions): Promise<Editor> {
+  return Editor.create(options)
+}
+
+export type { ToolName }

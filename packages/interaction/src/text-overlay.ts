@@ -1,0 +1,878 @@
+import { layoutArcText, measureTextAdvance, type Camera2D } from '@cadkit/geometry'
+import type { Entity, EntityId, ScreenPoint, TextArcPath, TextEntity } from '@cadkit/types'
+
+export interface TextDraftState {
+  entityId: EntityId | null
+  content: string
+  /** Caret / selection end (insertion point). */
+  caret: number
+  /** Selection start; equals caret when collapsed. */
+  selStart?: number
+  /** Selection end; equals caret when collapsed. */
+  selEnd?: number
+  world: { x: number; y: number }
+  /** World-space font size (same units as TextEntity.fontSize). */
+  fontSize: number
+  fontFamily: string
+  color: string
+  align?: 'left' | 'center' | 'right'
+  widthFactor?: number
+  rotation?: number
+  path?: TextArcPath
+}
+
+export { measureTextAdvance }
+
+function caretLocalOffset(
+  content: string,
+  caret: number,
+  fontSize: number,
+  fontFamily: string,
+  widthFactor = 1,
+): { x: number; y: number } {
+  const safe = Math.max(0, Math.min(caret, content.length))
+  const before = content.slice(0, safe)
+  const lines = before.split(/\r?\n/u)
+  const lineIndex = Math.max(0, lines.length - 1)
+  const lineText = lines[lineIndex] ?? ''
+  return {
+    x: measureTextAdvance(lineText, fontSize, fontFamily, widthFactor),
+    y: lineIndex * fontSize,
+  }
+}
+
+function makeGlyphSpan(): HTMLSpanElement {
+  const span = document.createElement('span')
+  Object.assign(span.style, {
+    position: 'absolute',
+    left: '0',
+    top: '0',
+    whiteSpace: 'pre',
+    lineHeight: '1',
+    transformOrigin: '50% 100%',
+  } as Partial<CSSStyleDeclaration>)
+  return span
+}
+
+function firstTextNode(el: HTMLElement): Text | null {
+  const walk = (node: Node): Text | null => {
+    if (node.nodeType === Node.TEXT_NODE) return node as Text
+    for (const child of node.childNodes) {
+      const found = walk(child)
+      if (found) return found
+    }
+    return null
+  }
+  return walk(el)
+}
+
+/** DOM labels for TextEntity so typed content is visible without waiting on GPU atlas. */
+export class TextOverlay {
+  readonly root: HTMLDivElement
+  private readonly pool = new Map<EntityId, HTMLDivElement>()
+  private draftEl: HTMLDivElement | null = null
+  private caretEl: HTMLDivElement | null = null
+  private selLayer: HTMLDivElement | null = null
+  private guideEl: SVGSVGElement | null = null
+  private draft: TextDraftState | null = null
+  private editingId: EntityId | null = null
+
+  constructor(host: HTMLElement) {
+    this.root = document.createElement('div')
+    this.root.className = 'cadkit-text-overlay'
+    Object.assign(this.root.style, {
+      position: 'absolute',
+      inset: '0',
+      pointerEvents: 'none',
+      // Above WebGPU canvas / rulers; below floating chrome (view bar z-20).
+      zIndex: '4',
+      overflow: 'hidden',
+    } as Partial<CSSStyleDeclaration>)
+    host.appendChild(this.root)
+  }
+
+  setCanvasBounds(left: number, top: number, right = 0, bottom = 0): void {
+    this.root.style.inset = `${top}px ${right}px ${bottom}px ${left}px`
+  }
+
+  setEditing(id: EntityId | null): void {
+    this.editingId = id
+  }
+
+  setDraft(draft: TextDraftState | null): void {
+    this.draft = draft
+    this.editingId = draft?.entityId ?? null
+  }
+
+  getDraft(): TextDraftState | null {
+    return this.draft
+  }
+
+  /**
+   * Screen-space caret tip (top of caret bar) used to park the hidden IME
+   * and to draw the blinking caret. Prefers live DOM Range metrics when available.
+   */
+  getCaretScreen(camera: Camera2D): { x: number; y: number; fontSizePx: number; rotation: number } | null {
+    if (!this.draft) return null
+    const zoom = camera.getState().zoom
+    const fontSizePx = this.draft.fontSize * zoom
+    const caret = this.draft.selEnd ?? this.draft.caret
+
+    if (this.draft.path?.kind === 'arc') {
+      return this.getArcCaretScreen(camera, caret, fontSizePx)
+    }
+
+    // Range metrics are axis-aligned; only trust them for upright text.
+    const rot = this.draft.rotation ?? 0
+    if (Math.abs(rot) < 1e-6) {
+      const fromDom = this.measureStraightCaretFromDom(caret)
+      if (fromDom) return fromDom
+    }
+
+    return this.computeStraightCaretScreen(camera, caret, fontSizePx)
+  }
+
+  /** Hit-test draft label (or a generous text pad) in overlay/canvas screen space. */
+  hitTestDraft(screen: ScreenPoint, camera: Camera2D, pad = 8): boolean {
+    if (!this.draft) return false
+    if (this.draftEl && this.draftEl.style.display !== 'none') {
+      const rootRect = this.root.getBoundingClientRect()
+      const r = this.draftEl.getBoundingClientRect()
+      if (r.width > 0 || r.height > 0) {
+        const x = rootRect.left + screen.x
+        const y = rootRect.top + screen.y
+        return (
+          x >= r.left - pad &&
+          x <= r.right + pad &&
+          y >= r.top - pad &&
+          y <= r.bottom + pad
+        )
+      }
+    }
+    // Fallback AABB around text (rotation ignored — still blocks entity drag while editing).
+    const zoom = camera.getState().zoom
+    const fontSizePx = this.draft.fontSize * zoom
+    const w =
+      measureTextAdvance(
+        this.draft.content || ' ',
+        this.draft.fontSize,
+        this.draft.fontFamily,
+        this.draft.widthFactor ?? 1,
+      ) * zoom
+    const lines = Math.max(1, this.draft.content.split(/\r?\n/u).length)
+    const h = fontSizePx * lines
+    const base = camera.worldToScreen({
+      x: this.draft.world.x,
+      y: this.draft.world.y,
+      __space: 'world',
+    })
+    let left = base.x
+    if (this.draft.align === 'center') left -= w / 2
+    else if (this.draft.align === 'right') left -= w
+    const top = base.y - fontSizePx
+    return (
+      screen.x >= left - pad &&
+      screen.x <= left + w + pad &&
+      screen.y >= top - pad &&
+      screen.y <= top + h + pad
+    )
+  }
+
+  /** Map a screen point to a caret index in the current draft. */
+  caretIndexAt(screen: ScreenPoint, camera: Camera2D): number {
+    if (!this.draft) return 0
+    const content = this.draft.content
+    if (!content) return 0
+
+    if (this.draft.path?.kind === 'arc') {
+      return this.arcCaretIndexAt(screen, camera)
+    }
+
+    const fromDom = this.straightCaretIndexFromDom(screen)
+    if (fromDom != null) return fromDom
+
+    return this.straightCaretIndexComputed(screen, camera)
+  }
+
+  update(entities: readonly Entity[], camera: Camera2D): void {
+    const seen = new Set<EntityId>()
+    for (const e of entities) {
+      if (e.type !== 'text' || e.style.visible === false) continue
+      if (this.editingId && e.id === this.editingId) {
+        seen.add(e.id)
+        const hidden = this.pool.get(e.id)
+        if (hidden) hidden.style.display = 'none'
+        continue
+      }
+      seen.add(e.id)
+      const el = this.ensureLabel(e.id)
+      this.paintLabel(el, e, camera)
+      el.style.display = 'block'
+    }
+    for (const [id, el] of this.pool) {
+      if (!seen.has(id)) {
+        el.remove()
+        this.pool.delete(id)
+      }
+    }
+    this.renderDraft(camera)
+    this.renderArcGuide(entities, camera)
+  }
+
+  clear(): void {
+    for (const el of this.pool.values()) el.remove()
+    this.pool.clear()
+    this.draftEl?.remove()
+    this.caretEl?.remove()
+    this.selLayer?.remove()
+    this.guideEl?.remove()
+    this.draftEl = null
+    this.caretEl = null
+    this.selLayer = null
+    this.guideEl = null
+    this.draft = null
+    this.editingId = null
+  }
+
+  dispose(): void {
+    this.clear()
+    this.root.remove()
+  }
+
+  /** Test helper: count glyph spans inside a label (arc mode). */
+  countGlyphNodes(id: EntityId): number {
+    const el = this.pool.get(id)
+    if (!el) return 0
+    return el.querySelectorAll('[data-cadkit-glyph]').length
+  }
+
+  private ensureLabel(id: EntityId): HTMLDivElement {
+    let el = this.pool.get(id)
+    if (!el) {
+      el = document.createElement('div')
+      Object.assign(el.style, {
+        position: 'absolute',
+        left: '0',
+        top: '0',
+        width: '0',
+        height: '0',
+        pointerEvents: 'none',
+        userSelect: 'none',
+      } as Partial<CSSStyleDeclaration>)
+      this.pool.set(id, el)
+      this.root.appendChild(el)
+    }
+    return el
+  }
+
+  private paintLabel(el: HTMLDivElement, e: TextEntity, camera: Camera2D): void {
+    if (e.path?.kind === 'arc') {
+      this.paintArcLabel(el, e, camera)
+      return
+    }
+    this.paintStraightLabel(el, e, camera)
+  }
+
+  private paintStraightLabel(el: HTMLDivElement, e: TextEntity, camera: Camera2D): void {
+    el.replaceChildren()
+    el.removeAttribute('data-arc')
+    const screen = camera.worldToScreen({
+      x: e.position.x,
+      y: e.position.y,
+      __space: 'world',
+    })
+    const zoom = camera.getState().zoom
+    const color = e.style.fill || e.style.stroke || '#111827'
+    const opacity = e.style.opacity ?? 1
+    const wf = e.widthFactor ?? 1
+    // Width in layout px before scaleX — scaleX applies widthFactor visually.
+    const naturalW = measureTextAdvance(e.content, e.fontSize, e.fontFamily || 'sans-serif', 1)
+    el.textContent = e.content
+    el.style.left = `${screen.x}px`
+    el.style.top = `${screen.y - e.fontSize * zoom}px`
+    el.style.width = `${Math.max(1, naturalW * zoom)}px`
+    el.style.height = 'auto'
+    el.style.whiteSpace = 'pre'
+    el.style.lineHeight = '1'
+    el.style.fontFamily = e.fontFamily || 'sans-serif'
+    el.style.fontSize = `${Math.max(1, e.fontSize * zoom)}px`
+    el.style.textAlign = e.align ?? 'left'
+    const anchorX = e.align === 'center' ? '50%' : e.align === 'right' ? '100%' : '0'
+    const translateX = e.align === 'center' ? '-50%' : e.align === 'right' ? '-100%' : '0'
+    el.style.transformOrigin = `${anchorX} 100%`
+    el.style.transform = `translateX(${translateX}) rotate(${e.rotation ?? 0}rad) scaleX(${wf})`
+    el.style.color = color
+    el.style.opacity = String(opacity)
+  }
+
+  private paintArcLabel(el: HTMLDivElement, e: TextEntity, camera: Camera2D): void {
+    const path = e.path!
+    const zoom = camera.getState().zoom
+    const color = e.style.fill || e.style.stroke || '#111827'
+    const opacity = e.style.opacity ?? 1
+    const poses = layoutArcText(
+      e.content,
+      e.fontSize,
+      e.position,
+      path,
+      e.widthFactor ?? 1,
+      e.fontFamily || 'sans-serif',
+    )
+    el.textContent = ''
+    el.setAttribute('data-arc', '1')
+    el.style.left = '0'
+    el.style.top = '0'
+    el.style.width = '0'
+    el.style.height = '0'
+    el.style.transform = ''
+    el.style.opacity = String(opacity)
+    el.style.color = color
+    el.style.fontFamily = e.fontFamily || 'sans-serif'
+    el.style.fontSize = `${Math.max(1, e.fontSize * zoom)}px`
+
+    const strokeOnly =
+      (!e.style.fill ||
+        e.style.fill === 'none' ||
+        e.style.fill === 'transparent' ||
+        /00$/i.test(e.style.fill)) &&
+      !!e.style.stroke &&
+      e.style.stroke !== 'none'
+
+    for (const g of poses) {
+      if (g.char === ' ') continue
+      const span = makeGlyphSpan()
+      span.dataset.cadkitGlyph = '1'
+      span.textContent = g.char
+      const screen = camera.worldToScreen({ x: g.x, y: g.y, __space: 'world' })
+      const deg = (g.rotation * 180) / Math.PI
+      span.style.fontFamily = e.fontFamily || 'sans-serif'
+      span.style.fontSize = `${Math.max(1, e.fontSize * zoom)}px`
+      if (strokeOnly) {
+        span.style.color = 'transparent'
+        span.style.webkitTextStroke = `${Math.max(0.6, 0.9 * zoom)}px ${e.style.stroke}`
+        span.style.paintOrder = 'stroke fill'
+      } else {
+        span.style.color = color
+        span.style.webkitTextStroke = ''
+      }
+      span.style.transform = `translate(${screen.x}px, ${screen.y}px) rotate(${deg}deg) translate(-50%, -100%)`
+      el.appendChild(span)
+    }
+  }
+
+  private renderDraft(camera: Camera2D): void {
+    if (!this.draft) {
+      if (this.draftEl) this.draftEl.style.display = 'none'
+      if (this.caretEl) this.caretEl.style.display = 'none'
+      if (this.selLayer) this.selLayer.style.display = 'none'
+      return
+    }
+    if (!this.draftEl) {
+      this.draftEl = document.createElement('div')
+      Object.assign(this.draftEl.style, {
+        position: 'absolute',
+        left: '0',
+        top: '0',
+        width: '0',
+        height: '0',
+        pointerEvents: 'none',
+        userSelect: 'none',
+      } as Partial<CSSStyleDeclaration>)
+      this.root.appendChild(this.draftEl)
+    }
+    if (!this.selLayer) {
+      this.selLayer = document.createElement('div')
+      Object.assign(this.selLayer.style, {
+        position: 'absolute',
+        inset: '0',
+        pointerEvents: 'none',
+        overflow: 'visible',
+      } as Partial<CSSStyleDeclaration>)
+      this.root.appendChild(this.selLayer)
+    }
+    if (!this.caretEl) {
+      this.caretEl = document.createElement('div')
+      this.caretEl.className = 'cadkit-text-caret'
+      Object.assign(this.caretEl.style, {
+        position: 'absolute',
+        width: '1.5px',
+        background: '#2563eb',
+        pointerEvents: 'none',
+        transformOrigin: '0 0',
+      } as Partial<CSSStyleDeclaration>)
+      this.root.appendChild(this.caretEl)
+      if (!document.getElementById('cadkit-text-caret-style')) {
+        const style = document.createElement('style')
+        style.id = 'cadkit-text-caret-style'
+        style.textContent =
+          '@keyframes cadkit-caret-blink{0%,49%{opacity:1}50%,100%{opacity:0}}.cadkit-text-caret{animation:cadkit-caret-blink 1s step-end infinite}'
+        document.head.appendChild(style)
+      }
+    }
+
+    const d = this.draft
+    const fake: TextEntity = {
+      id: (d.entityId ?? ('draft' as EntityId)) as EntityId,
+      type: 'text',
+      layerId: '0' as never,
+      style: { fill: d.color, stroke: d.color },
+      transform: [1, 0, 0, 1, 0, 0],
+      version: 1,
+      content: d.content,
+      position: { x: d.world.x, y: d.world.y },
+      fontFamily: d.fontFamily,
+      fontSize: d.fontSize,
+      align: d.align,
+      widthFactor: d.widthFactor,
+      rotation: d.rotation,
+      path: d.path,
+    }
+
+    this.paintLabel(this.draftEl, fake, camera)
+    this.draftEl.style.display = 'block'
+
+    this.renderSelectionHighlight(camera)
+
+    const caret = this.getCaretScreen(camera)
+    if (!caret) {
+      this.caretEl.style.display = 'none'
+      return
+    }
+    const selStart = d.selStart ?? d.caret
+    const selEnd = d.selEnd ?? d.caret
+    // Hide caret while a non-collapsed selection is active (OS text-field convention).
+    if (selStart !== selEnd) {
+      this.caretEl.style.display = 'none'
+      return
+    }
+    this.caretEl.style.display = 'block'
+    this.caretEl.style.left = `${caret.x}px`
+    this.caretEl.style.top = `${caret.y}px`
+    this.caretEl.style.height = `${Math.max(8, caret.fontSizePx)}px`
+    this.caretEl.style.transform = caret.rotation ? `rotate(${caret.rotation}rad)` : ''
+  }
+
+  private renderSelectionHighlight(camera: Camera2D): void {
+    if (!this.selLayer || !this.draft) return
+    const start = this.draft.selStart ?? this.draft.caret
+    const end = this.draft.selEnd ?? this.draft.caret
+    const a = Math.min(start, end)
+    const b = Math.max(start, end)
+    this.selLayer.replaceChildren()
+    if (a === b) {
+      this.selLayer.style.display = 'none'
+      return
+    }
+    this.selLayer.style.display = 'block'
+    const rootRect = this.root.getBoundingClientRect()
+
+    if (this.draft.path?.kind === 'arc') {
+      const poses = layoutArcText(
+        this.draft.content,
+        this.draft.fontSize,
+        this.draft.world,
+        this.draft.path,
+        this.draft.widthFactor ?? 1,
+        this.draft.fontFamily,
+      )
+      const zoom = camera.getState().zoom
+      const fontSizePx = this.draft.fontSize * zoom
+      for (let i = a; i < b && i < poses.length; i++) {
+        const g = poses[i]!
+        if (g.char === ' ' || g.char === '\n') continue
+        const screen = camera.worldToScreen({ x: g.x, y: g.y, __space: 'world' })
+        const box = document.createElement('div')
+        const w = Math.max(4, g.advance * zoom)
+        Object.assign(box.style, {
+          position: 'absolute',
+          left: `${screen.x}px`,
+          top: `${screen.y}px`,
+          width: `${w}px`,
+          height: `${fontSizePx}px`,
+          background: 'rgba(37, 99, 235, 0.28)',
+          transform: `rotate(${g.rotation}rad) translate(-50%, -100%)`,
+          transformOrigin: '50% 100%',
+          pointerEvents: 'none',
+        } as Partial<CSSStyleDeclaration>)
+        this.selLayer.appendChild(box)
+      }
+      return
+    }
+
+    const rects = this.measureStraightSelectionRects(a, b)
+    if (rects.length) {
+      for (const r of rects) {
+        if (r.width <= 0 && r.height <= 0) continue
+        const box = document.createElement('div')
+        Object.assign(box.style, {
+          position: 'absolute',
+          left: `${r.left - rootRect.left}px`,
+          top: `${r.top - rootRect.top}px`,
+          width: `${Math.max(1, r.width)}px`,
+          height: `${Math.max(1, r.height)}px`,
+          background: 'rgba(37, 99, 235, 0.28)',
+          pointerEvents: 'none',
+        } as Partial<CSSStyleDeclaration>)
+        this.selLayer.appendChild(box)
+      }
+      return
+    }
+
+    // Computed fallback for environments without layout (happy-dom).
+    const zoom = camera.getState().zoom
+    const fontSizePx = this.draft.fontSize * zoom
+    const before = this.draft.content.slice(0, a)
+    const selected = this.draft.content.slice(a, b)
+    const lineStart = before.lastIndexOf('\n') + 1
+    const lineSel = selected.split(/\r?\n/u)[0] ?? ''
+    const x0 = measureTextAdvance(
+      this.draft.content.slice(lineStart, a),
+      this.draft.fontSize,
+      this.draft.fontFamily,
+      this.draft.widthFactor ?? 1,
+    )
+    const x1 =
+      x0 +
+      measureTextAdvance(
+        lineSel,
+        this.draft.fontSize,
+        this.draft.fontFamily,
+        this.draft.widthFactor ?? 1,
+      )
+    const caret0 = this.computeStraightCaretScreen(camera, a, fontSizePx)
+    if (!caret0) return
+    const box = document.createElement('div')
+    const w = Math.max(1, (x1 - x0) * zoom)
+    Object.assign(box.style, {
+      position: 'absolute',
+      left: `${caret0.x}px`,
+      top: `${caret0.y}px`,
+      width: `${w}px`,
+      height: `${fontSizePx}px`,
+      background: 'rgba(37, 99, 235, 0.28)',
+      transform: caret0.rotation ? `rotate(${caret0.rotation}rad)` : '',
+      transformOrigin: '0 0',
+      pointerEvents: 'none',
+    } as Partial<CSSStyleDeclaration>)
+    this.selLayer.appendChild(box)
+  }
+
+  private measureStraightCaretFromDom(
+    index: number,
+  ): { x: number; y: number; fontSizePx: number; rotation: number } | null {
+    if (!this.draftEl || this.draftEl.style.display === 'none') return null
+    const textNode = firstTextNode(this.draftEl)
+    if (!textNode) return null
+    const len = textNode.length
+    const i = Math.max(0, Math.min(index, len))
+    try {
+      const range = document.createRange()
+      if (i < len) {
+        range.setStart(textNode, i)
+        range.setEnd(textNode, Math.min(i + 1, len))
+        const r = range.getBoundingClientRect()
+        if (r.height > 0 || r.width > 0) {
+          const rootRect = this.root.getBoundingClientRect()
+          return {
+            x: r.left - rootRect.left,
+            y: r.top - rootRect.top,
+            fontSizePx: r.height || (this.draft?.fontSize ?? 12),
+            rotation: this.draft?.rotation ?? 0,
+          }
+        }
+      }
+      if (i > 0) {
+        range.setStart(textNode, i - 1)
+        range.setEnd(textNode, i)
+        const r = range.getBoundingClientRect()
+        if (r.height > 0 || r.width > 0) {
+          const rootRect = this.root.getBoundingClientRect()
+          return {
+            x: r.right - rootRect.left,
+            y: r.top - rootRect.top,
+            fontSizePx: r.height || (this.draft?.fontSize ?? 12),
+            rotation: this.draft?.rotation ?? 0,
+          }
+        }
+      }
+      // Empty content — use label box.
+      const box = this.draftEl.getBoundingClientRect()
+      if (box.height > 0 || box.width > 0) {
+        const rootRect = this.root.getBoundingClientRect()
+        const align = this.draft?.align ?? 'left'
+        let x = box.left - rootRect.left
+        if (align === 'center') x += box.width / 2
+        else if (align === 'right') x += box.width
+        return {
+          x,
+          y: box.top - rootRect.top,
+          fontSizePx: box.height || (this.draft?.fontSize ?? 12),
+          rotation: this.draft?.rotation ?? 0,
+        }
+      }
+    } catch {
+      /* Range unsupported */
+    }
+    return null
+  }
+
+  private measureStraightSelectionRects(start: number, end: number): DOMRect[] {
+    if (!this.draftEl) return []
+    const textNode = firstTextNode(this.draftEl)
+    if (!textNode) return []
+    const a = Math.max(0, Math.min(start, textNode.length))
+    const b = Math.max(0, Math.min(end, textNode.length))
+    if (a === b) return []
+    try {
+      const range = document.createRange()
+      range.setStart(textNode, Math.min(a, b))
+      range.setEnd(textNode, Math.max(a, b))
+      return [...range.getClientRects()]
+    } catch {
+      return []
+    }
+  }
+
+  private computeStraightCaretScreen(
+    camera: Camera2D,
+    caret: number,
+    fontSizePx: number,
+  ): { x: number; y: number; fontSizePx: number; rotation: number } | null {
+    if (!this.draft) return null
+    const zoom = camera.getState().zoom
+    const rot = this.draft.rotation ?? 0
+    const wf = this.draft.widthFactor ?? 1
+    // Local offset in CSS px before scaleX (paint applies widthFactor via scaleX).
+    const off = caretLocalOffset(
+      this.draft.content,
+      caret,
+      this.draft.fontSize,
+      this.draft.fontFamily,
+      1,
+    )
+    const base = camera.worldToScreen({
+      x: this.draft.world.x,
+      y: this.draft.world.y,
+      __space: 'world',
+    })
+    const topLeft = { x: base.x, y: base.y - fontSizePx }
+    const naturalW = measureTextAdvance(
+      this.draft.content,
+      this.draft.fontSize,
+      this.draft.fontFamily,
+      1,
+    )
+    const W = naturalW * zoom
+    const H = fontSizePx
+    const align = this.draft.align ?? 'left'
+    const ox = align === 'center' ? W / 2 : align === 'right' ? W : 0
+    // CSS: transform-origin (ox, H) + translateX(-ox) rotate scaleX — ox terms cancel.
+    const lx = off.x * zoom
+    const ly = off.y * zoom
+    const relX = (lx - ox) * wf
+    const relY = ly - H
+    const cos = Math.cos(rot)
+    const sin = Math.sin(rot)
+    return {
+      x: topLeft.x + relX * cos - relY * sin,
+      y: topLeft.y + H + relX * sin + relY * cos,
+      fontSizePx,
+      rotation: rot,
+    }
+  }
+
+  private getArcCaretScreen(
+    camera: Camera2D,
+    caret: number,
+    fontSizePx: number,
+  ): { x: number; y: number; fontSizePx: number; rotation: number } {
+    const draft = this.draft!
+    const poses = layoutArcText(
+      draft.content,
+      draft.fontSize,
+      draft.world,
+      draft.path!,
+      draft.widthFactor ?? 1,
+      draft.fontFamily,
+    )
+    if (poses.length === 0) {
+      const screen = camera.worldToScreen({
+        x: draft.world.x + draft.path!.radius,
+        y: draft.world.y,
+        __space: 'world',
+      })
+      return { x: screen.x, y: screen.y - fontSizePx, fontSizePx, rotation: 0 }
+    }
+    const idx = Math.max(0, Math.min(caret, poses.length) - 1)
+    const g = poses[Math.max(0, idx)]!
+    const after = caret <= 0 ? poses[0]! : g
+    const along = caret <= 0 ? -after.advance / 2 : after.advance / 2
+    const wx = after.x + Math.cos(after.rotation) * along
+    const wy = after.y + Math.sin(after.rotation) * along
+    const screen = camera.worldToScreen({ x: wx, y: wy, __space: 'world' })
+    return {
+      x: screen.x,
+      y: screen.y - fontSizePx,
+      fontSizePx,
+      rotation: after.rotation,
+    }
+  }
+
+  private straightCaretIndexFromDom(screen: ScreenPoint): number | null {
+    if (!this.draftEl || !this.draft) return null
+    const textNode = firstTextNode(this.draftEl)
+    if (!textNode) return null
+    const len = textNode.length
+    if (len === 0) return 0
+    const rootRect = this.root.getBoundingClientRect()
+    const targetX = rootRect.left + screen.x
+    const targetY = rootRect.top + screen.y
+    try {
+      let best = 0
+      let bestDist = Infinity
+      for (let i = 0; i <= len; i++) {
+        const range = document.createRange()
+        if (i < len) {
+          range.setStart(textNode, i)
+          range.setEnd(textNode, Math.min(i + 1, len))
+          const r = range.getBoundingClientRect()
+          if (r.width === 0 && r.height === 0) continue
+          const cx = r.left
+          const cy = r.top + r.height / 2
+          const dist = (cx - targetX) ** 2 + (cy - targetY) ** 2
+          if (dist < bestDist) {
+            bestDist = dist
+            best = i
+          }
+          // If click is in the right half of this glyph, prefer after it.
+          if (
+            targetX >= r.left &&
+            targetX <= r.right &&
+            targetY >= r.top - 2 &&
+            targetY <= r.bottom + 2
+          ) {
+            return targetX > r.left + r.width / 2 ? i + 1 : i
+          }
+        } else {
+          range.setStart(textNode, len - 1)
+          range.setEnd(textNode, len)
+          const r = range.getBoundingClientRect()
+          if (r.width === 0 && r.height === 0) continue
+          const cx = r.right
+          const cy = r.top + r.height / 2
+          const dist = (cx - targetX) ** 2 + (cy - targetY) ** 2
+          if (dist < bestDist) {
+            bestDist = dist
+            best = len
+          }
+        }
+      }
+      return bestDist < Infinity ? best : null
+    } catch {
+      return null
+    }
+  }
+
+  private straightCaretIndexComputed(screen: ScreenPoint, camera: Camera2D): number {
+    if (!this.draft) return 0
+    const content = this.draft.content
+    const zoom = camera.getState().zoom
+    const fontSizePx = this.draft.fontSize * zoom
+    let best = 0
+    let bestDist = Infinity
+    for (let i = 0; i <= content.length; i++) {
+      const c = this.computeStraightCaretScreen(camera, i, fontSizePx)
+      if (!c) continue
+      const dist = (c.x - screen.x) ** 2 + (c.y + fontSizePx / 2 - screen.y) ** 2
+      if (dist < bestDist) {
+        bestDist = dist
+        best = i
+      }
+    }
+    return best
+  }
+
+  private arcCaretIndexAt(screen: ScreenPoint, camera: Camera2D): number {
+    if (!this.draft?.path || this.draft.path.kind !== 'arc') return 0
+    const poses = layoutArcText(
+      this.draft.content,
+      this.draft.fontSize,
+      this.draft.world,
+      this.draft.path,
+      this.draft.widthFactor ?? 1,
+      this.draft.fontFamily,
+    )
+    if (poses.length === 0) return 0
+    let best = 0
+    let bestDist = Infinity
+    for (let i = 0; i <= poses.length; i++) {
+      const caret = this.getArcCaretScreen(camera, i, this.draft.fontSize * camera.getState().zoom)
+      const dist = (caret.x - screen.x) ** 2 + (caret.y - screen.y) ** 2
+      if (dist < bestDist) {
+        bestDist = dist
+        best = i
+      }
+    }
+    return best
+  }
+
+  private renderArcGuide(entities: readonly Entity[], camera: Camera2D): void {
+    const arcs = entities.filter(
+      (e): e is TextEntity =>
+        e.type === 'text' &&
+        e.path?.kind === 'arc' &&
+        e.style.visible !== false &&
+        !(this.editingId && e.id === this.editingId),
+    )
+    const draftArc = this.draft?.path?.kind === 'arc' ? this.draft : null
+    if (arcs.length === 0 && !draftArc) {
+      if (this.guideEl) this.guideEl.style.display = 'none'
+      return
+    }
+    if (!this.guideEl) {
+      this.guideEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      Object.assign(this.guideEl.style, {
+        position: 'absolute',
+        inset: '0',
+        width: '100%',
+        height: '100%',
+        overflow: 'visible',
+        pointerEvents: 'none',
+      } as Partial<CSSStyleDeclaration>)
+      this.root.appendChild(this.guideEl)
+    }
+    this.guideEl.style.display = 'block'
+    this.guideEl.replaceChildren()
+    const draw = (center: { x: number; y: number }, path: TextArcPath) => {
+      const r = Math.max(1e-3, path.radius)
+      const a0 = path.startAngle
+      const a1 = path.startAngle + path.sweep
+      const p0 = camera.worldToScreen({
+        x: center.x + r * Math.cos(a0),
+        y: center.y + r * Math.sin(a0),
+        __space: 'world',
+      })
+      const p1 = camera.worldToScreen({
+        x: center.x + r * Math.cos(a1),
+        y: center.y + r * Math.sin(a1),
+        __space: 'world',
+      })
+      const zoom = camera.getState().zoom
+      const rr = r * zoom
+      const large = Math.abs(path.sweep) > Math.PI ? 1 : 0
+      const sweepFlag = path.sweep < 0 ? 0 : 1
+      const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      pathEl.setAttribute(
+        'd',
+        `M ${p0.x} ${p0.y} A ${rr} ${rr} 0 ${large} ${sweepFlag} ${p1.x} ${p1.y}`,
+      )
+      pathEl.setAttribute('fill', 'none')
+      pathEl.setAttribute('stroke', '#60a5fa')
+      pathEl.setAttribute('stroke-width', '1.25')
+      pathEl.setAttribute('opacity', '0.85')
+      this.guideEl!.appendChild(pathEl)
+    }
+    for (const e of arcs) draw(e.position, e.path!)
+    if (draftArc) draw(draftArc.world, draftArc.path!)
+  }
+}

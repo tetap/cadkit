@@ -1,0 +1,42 @@
+{
+  "name": "cadkit",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Industrial CAD canvas editor framework — WebGPU-only",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rimraf node_modules",
+    "docs:dev": "pnpm --filter @cadkit/docs dev",
+    "docs:build": "pnpm --filter @cadkit/docs build",
+    "playground:dev": "pnpm --filter @cadkit/playground dev",
+    "playground:build": "pnpm --filter @cadkit/playground build",
+    "benchmark": "pnpm --filter @cadkit/playground benchmark",
+    "test:perf": "pnpm --filter @cadkit/scene exec vitest run src/squares.perf.test.ts",
+    "spike:cpu": "node scripts/cpu-spike.mjs",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.5",
+    "@types/node": "^22.15.30",
+    "happy-dom": "^20.11.1",
+    "rimraf": "^6.0.1",
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

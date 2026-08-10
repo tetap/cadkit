@@ -1,0 +1,32 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "types": [
+      "@webgpu/types"
+    ]
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../types"
+    },
+    {
+      "path": "../render-core"
+    },
+    {
+      "path": "../scene"
+    },
+    {
+      "path": "../assets"
+    }
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.perf.test.ts"
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../types"
+    },
+    {
+      "path": "../assets"
+    },
+    {
+      "path": "../geometry"
+    },
+    {
+      "path": "../document"
+    },
+    {
+      "path": "../spatial"
+    },
+    {
+      "path": "../commands"
+    },
+    {
+      "path": "../scene"
+    },
+    {
+      "path": "../render-core"
+    },
+    {
+      "path": "../render-webgpu"
+    },
+    {
+      "path": "../interaction"
+    },
+    {
+      "path": "../guides"
+    },
+    {
+      "path": "../text"
+    },
+    {
+      "path": "../io-svg"
+    },
+    {
+      "path": "../io-dxf"
+    },
+    {
+      "path": "../platform-web"
+    },
+    {
+      "path": "../worker-runtime"
+    }
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.perf.test.ts"
+  ]
+}

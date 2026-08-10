@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../types"
+    },
+    {
+      "path": "../geometry"
+    }
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.perf.test.ts"
+  ]
+}

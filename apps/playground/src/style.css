@@ -1,0 +1,67 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'DM Sans', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Outfit', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --color-canvas-out: #d8dde3;
+  --color-brand: #22c55e;
+  --color-brand-dark: #16a34a;
+  --color-ink: #1f2937;
+  --color-muted: #6b7280;
+  --color-line: #e5e7eb;
+  --color-panel: #ffffff;
+  --color-soft: #f3f4f6;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    @apply m-0 h-full overflow-hidden font-sans text-ink antialiased;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+
+  button:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply outline-2 outline-offset-2 outline-brand;
+  }
+}
+
+/* Editor host: rulers + main canvas are positioned by Editor.layoutChrome */
+#canvas-host {
+  @apply relative min-h-0 flex-1 overflow-hidden bg-canvas-out;
+}
+
+/* Never force size on every canvas — ruler canvases share this host. */
+#canvas-host > #view {
+  display: block;
+}
+
+.tool-tooltip {
+  @apply pointer-events-none fixed z-50 flex max-w-[240px] flex-col gap-1 rounded-lg border border-neutral-200 bg-white px-2.5 py-2 text-xs shadow-lg;
+}
+
+.tool-tooltip strong {
+  @apply text-[13px] font-semibold text-ink;
+}
+
+.tool-tooltip span {
+  @apply leading-snug text-muted;
+}

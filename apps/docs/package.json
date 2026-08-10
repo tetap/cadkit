@@ -1,0 +1,20 @@
+{
+  "name": "@cadkit/docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview",
+    "typecheck": "echo 'docs: no tsc'",
+    "test": "node i18n.test.mjs",
+    "lint": "echo 'docs: no lint'",
+    "clean": "rimraf .vitepress/dist .vitepress/cache"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3",
+    "vue": "^3.5.16",
+    "rimraf": "^6.0.1"
+  }
+}

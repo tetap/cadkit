@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CADKit Editor</title>
+    <meta name="description" content="CADKit desktop editor playground — zh-CN / en-US" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Outfit:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body class="bg-soft text-ink">
+    <div id="app" class="flex h-dvh w-full overflow-hidden bg-soft">
+      <!-- Left: drawing tools -->
+      <nav
+        id="tool-rail"
+        class="flex h-full w-14 shrink-0 flex-col border-r border-line bg-soft"
+        aria-label="Tools"
+      ></nav>
+
+      <!-- Center: canvas + floating chrome (context bar / view bar) -->
+      <section class="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div id="canvas-host" class="canvas-host">
+          <canvas id="view" aria-label="Canvas"></canvas>
+          <div
+            id="context-bar"
+            class="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-4"
+            role="toolbar"
+            aria-label="Properties"
+          ></div>
+          <div
+            id="view-bar"
+            class="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4"
+            role="toolbar"
+            aria-label="View"
+          ></div>
+        </div>
+      </section>
+
+      <!-- Right: file chrome + reserved slot (no element inspector) -->
+      <aside
+        class="flex w-[280px] shrink-0 flex-col border-l border-line bg-panel"
+        aria-label="Sidebar"
+      >
+        <header id="app-bar" class="shrink-0 border-b border-line" role="banner"></header>
+        <div id="side-slot" class="min-h-0 flex-1 overflow-y-auto p-3" aria-label="Side panel"></div>
+        <div
+          id="status-bar"
+          class="shrink-0 border-t border-line px-3 py-2 text-[11px] text-muted"
+          role="status"
+        ></div>
+      </aside>
+    </div>
+
+    <div id="dev-modal" class="fixed inset-0 z-[100]" hidden>
+      <div class="absolute inset-0 bg-black/45" data-dev-close></div>
+      <div
+        class="absolute left-1/2 top-[10%] w-[min(720px,92vw)] -translate-x-1/2 overflow-hidden rounded-xl border border-line bg-panel shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dev-modal-title"
+      >
+        <header class="flex items-center justify-between border-b border-line px-4 py-3">
+          <h2 id="dev-modal-title" class="font-display text-base font-semibold">Dev</h2>
+          <button
+            type="button"
+            class="grid h-8 w-8 place-items-center rounded-md text-lg text-muted hover:bg-soft"
+            data-dev-close
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </header>
+        <div id="dev-modal-body" class="max-h-[70vh] overflow-y-auto p-4"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
