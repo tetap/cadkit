@@ -70,9 +70,33 @@ export function applyAffineToEntity(entity: Entity, m: Matrix3): Entity {
       }
       break
     }
-    case 'text':
-      next = { ...entity, position: tp(entity.position) }
+    case 'text': {
+      const sx = Math.hypot(m[0], m[1])
+      const sy = Math.hypot(m[2], m[3])
+      const s =
+        sx > 1e-8 && sy > 1e-8 ? Math.sqrt(sx * sy) : Math.max(sx, sy, 1e-8)
+      const angle = Math.atan2(m[1], m[0])
+      if (entity.path?.kind === 'arc') {
+        next = {
+          ...entity,
+          position: tp(entity.position),
+          fontSize: Math.max(1e-3, entity.fontSize * s),
+          path: {
+            ...entity.path,
+            radius: Math.max(1e-3, entity.path.radius * s),
+            startAngle: entity.path.startAngle + angle,
+          },
+        }
+      } else {
+        next = {
+          ...entity,
+          position: tp(entity.position),
+          fontSize: Math.max(1e-3, entity.fontSize * s),
+          rotation: (entity.rotation ?? 0) + angle,
+        }
+      }
       break
+    }
     case 'nurbs':
       next = { ...entity, controlPoints: entity.controlPoints.map(tp) }
       break

@@ -164,8 +164,9 @@ export function placeStraightTextFromArc(entity: TextLayoutInput): { position: V
 
 /**
  * Axis-aligned bounds from rotated glyph quads.
- * Matches TextOverlay arc anchors: em-box bottom-center on each pose
- * (`translate(-50%, -100%)`), so local y ∈ [-fontSize, 0].
+ * Matches TextOverlay arc anchors with transform-origin 0 0:
+ * `translate(pose) rotate translate(-50%, -100%)` → em-box bottom-center on pose,
+ * local y ∈ [-fontSize, 0] (Y-down).
  */
 export function arcTextLocalBounds(
   content: string,
@@ -182,8 +183,12 @@ export function arcTextLocalBounds(
   }
   const out = emptyAABB()
   const em = Math.max(1e-6, fontSize)
+  // Overlay does not scaleX glyphs; widthFactor only stretches arc spacing.
+  const wf = Math.max(1e-6, widthFactor)
   for (const g of poses) {
-    const hw = Math.max(g.advance, em * 0.5) / 2
+    if (!g.char.trim()) continue
+    const visualAdvance = g.advance / wf
+    const hw = Math.max(visualAdvance, em * 0.5) / 2
     // Local quad relative to em-box bottom-center (pose).
     const corners: Vec2[] = [
       { x: -hw, y: -em },

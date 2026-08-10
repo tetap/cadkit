@@ -48,6 +48,49 @@ describe('layoutArcText', () => {
     expect(box.maxX - box.minX).toBeGreaterThan(20)
     expect(box.maxY - box.minY).toBeGreaterThan(20)
   })
+
+  it('em-box at the apex sits above the pose (Y-down)', () => {
+    const center = { x: 0, y: 0 }
+    const path = {
+      kind: 'arc' as const,
+      radius: 100,
+      startAngle: -Math.PI / 2,
+      sweep: Math.PI / 8,
+    }
+    const fontSize = 20
+    const poses = layoutArcText('O', fontSize, center, path)
+    expect(poses).toHaveLength(1)
+    const pose = poses[0]!
+    // Mid-character near the top: rotation ≈ 0, pose ≈ (0, -radius).
+    expect(Math.abs(pose.rotation)).toBeLessThan(0.1)
+    expect(pose.y).toBeCloseTo(-100, 0)
+
+    const box = arcTextLocalBounds('O', fontSize, center, path)
+    // Em-box hangs "above" the pose (smaller Y) for near-upright apex glyphs.
+    expect(box.maxY).toBeLessThanOrEqual(pose.y + 1)
+    expect(box.minY).toBeLessThan(pose.y - fontSize * 0.5)
+    expect(box.minY).toBeGreaterThan(pose.y - fontSize * 1.5)
+    expect(box.minX).toBeLessThan(pose.x)
+    expect(box.maxX).toBeGreaterThan(pose.x)
+  })
+
+  it('rotated side glyphs expand the AABB outward from the pose', () => {
+    const center = { x: 0, y: 0 }
+    const path = {
+      kind: 'arc' as const,
+      radius: 50,
+      startAngle: 0,
+      sweep: 0.01,
+      baseline: 'outer' as const,
+    }
+    const fontSize = 10
+    const poses = layoutArcText('I', fontSize, center, path)
+    const pose = poses[0]!
+    const box = arcTextLocalBounds('I', fontSize, center, path)
+    // Outer baseline at angle≈0: em-box grows in +X (away from center).
+    expect(box.maxX).toBeGreaterThan(pose.x + fontSize * 0.5)
+    expect(box.minX).toBeLessThanOrEqual(pose.x + 1e-6)
+  })
 })
 
 describe('placeArcTextCentered', () => {

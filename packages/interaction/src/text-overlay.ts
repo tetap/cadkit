@@ -49,7 +49,9 @@ function makeGlyphSpan(): HTMLSpanElement {
     top: '0',
     whiteSpace: 'pre',
     lineHeight: '1',
-    transformOrigin: '50% 100%',
+    // Origin at top-left so `translate(x,y) rotate translate(-50%,-100%)`
+    // puts the em-box bottom-center on the layout pose (matches arcTextLocalBounds).
+    transformOrigin: '0 0',
   } as Partial<CSSStyleDeclaration>)
   return span
 }
@@ -481,13 +483,13 @@ export class TextOverlay {
         const w = Math.max(4, g.advance * zoom)
         Object.assign(box.style, {
           position: 'absolute',
-          left: `${screen.x}px`,
-          top: `${screen.y}px`,
+          left: '0',
+          top: '0',
           width: `${w}px`,
           height: `${fontSizePx}px`,
           background: 'rgba(37, 99, 235, 0.28)',
-          transform: `rotate(${g.rotation}rad) translate(-50%, -100%)`,
-          transformOrigin: '50% 100%',
+          transform: `translate(${screen.x}px, ${screen.y}px) rotate(${g.rotation}rad) translate(-50%, -100%)`,
+          transformOrigin: '0 0',
           pointerEvents: 'none',
         } as Partial<CSSStyleDeclaration>)
         this.selLayer.appendChild(box)

@@ -31,7 +31,6 @@ async function boot(): Promise<void> {
 
   const editor = await createEditor({
     view: canvas,
-    renderer: 'webgpu',
     theme: 'light',
     document: { unit: 'mm', displayUnit: 'mm', tolerance: 1e-6, schemaVersion: 1 },
     guides: {

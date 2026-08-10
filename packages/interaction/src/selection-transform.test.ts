@@ -65,6 +65,31 @@ describe('selection-transform', () => {
     expect(patch).toMatchObject({ start: { x: 0, y: 0 }, end: { x: 200, y: 0 } })
   })
 
+  it('scales text fontSize (and arc radius) about an anchor', () => {
+    const text = {
+      id: createEntityId('text'),
+      type: 'text' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      content: 'Hi',
+      position: { x: 50, y: 40 },
+      fontFamily: 'sans-serif',
+      fontSize: 20,
+      path: {
+        kind: 'arc' as const,
+        radius: 40,
+        startAngle: -Math.PI / 2,
+        sweep: Math.PI,
+      },
+    }
+    const patch = transformEntityPatch(text, scaleMatrixAbout({ x: 0, y: 0 }, 2, 2))
+    expect(patch?.position).toEqual({ x: 100, y: 80 })
+    expect(patch?.fontSize).toBeCloseTo(40)
+    expect(patch?.path).toMatchObject({ kind: 'arc', radius: 80 })
+  })
+
   it('aggregates selection bounds', () => {
     const a = {
       id: createEntityId(),
