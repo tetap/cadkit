@@ -129,7 +129,7 @@ export function seedDemoContent(editor: Editor): void {
     id: createEntityId('demo-rect'),
     type: 'polyline',
     layerId: base,
-    style: { stroke: '#2563eb', strokeWidth: 1.25, fill: '#2563eb40' },
+    style: { stroke: '#2563eb', strokeWidth: 1.25, fill: '#2563eb' },
     transform: IDENTITY_TRANSFORM,
     version: 1,
     points: [
@@ -167,7 +167,7 @@ export function seedDemoContent(editor: Editor): void {
     id: createEntityId('text-arc'),
     type: 'text',
     layerId: textLayer.id,
-    style: { stroke: '#f59e0b', fill: '#00000000' },
+    style: { stroke: '#f59e0b', fill: '#f59e0b' },
     transform: IDENTITY_TRANSFORM,
     version: 1,
     content: 'HELLO',

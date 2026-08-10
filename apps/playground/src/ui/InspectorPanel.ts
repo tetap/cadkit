@@ -1,4 +1,5 @@
 import type { Editor } from '@cadkit/editor'
+import { placeArcTextCentered, placeStraightTextFromArc } from '@cadkit/geometry'
 import type { Entity, ImageEntity, TextEntity } from '@cadkit/types'
 import type { AppStore } from '../app/store.js'
 import { refreshHotFromSelection } from '../bindEditorEvents.js'
@@ -53,7 +54,7 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
             <input type="checkbox" id="ins-arc" class="h-4 w-4" ${arc ? 'checked' : ''} /></div>
           <div id="ins-arc-fields" class="${arc ? 'space-y-2' : 'hidden space-y-2'}">
             <div class="${row}"><label class="text-muted">${t('arcRadius')}</label>
-              <input type="number" id="ins-arc-r" class="${fieldControl}" min="1" step="1" value="${arc?.radius ?? Math.max(40, te.fontSize * 4)}" /></div>
+              <input type="number" id="ins-arc-r" class="${fieldControl}" min="1" step="1" value="${arc?.radius ?? Math.max(20, te.fontSize * 2.5)}" /></div>
             <div class="${rowPair}"><label class="text-muted">${t('arcStart')}</label>
               <input type="number" id="ins-arc-start" class="${fieldControl}" step="1" value="${startDeg}" />
               <label class="text-muted">${t('arcSweep')}</label>
@@ -120,11 +121,17 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
     const applyArcPath = () => {
       const e = editor.document.getEntity(id)
       if (!e || e.type !== 'text') return
+      const te = e as TextEntity
       const enabled = (el.querySelector('#ins-arc') as HTMLInputElement | null)?.checked ?? false
       const fields = el.querySelector('#ins-arc-fields')
       if (fields) fields.classList.toggle('hidden', !enabled)
       if (!enabled) {
-        editor.updateEntity(id, { path: undefined } as Partial<Entity>, 'ins-arc-off')
+        const next = placeStraightTextFromArc(te)
+        editor.updateEntity(
+          id,
+          { path: undefined, position: next.position } as Partial<Entity>,
+          'ins-arc-off',
+        )
         refreshHotFromSelection(editor, store)
         return
       }
@@ -133,17 +140,39 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
       const sweepDeg = Number((el.querySelector('#ins-arc-sweep') as HTMLInputElement | null)?.value)
       const baseline = ((el.querySelector('#ins-arc-base') as HTMLSelectElement | null)?.value ??
         'outer') as 'outer' | 'inner'
-      const te = e as TextEntity
+      // First enable: center on current visual midpoint. Later edits keep the apex fixed.
+      if (te.path?.kind !== 'arc') {
+        const placed = placeArcTextCentered(te, {
+          radius: Number.isFinite(radius) && radius > 0 ? radius : undefined,
+          sweep: (Number.isFinite(sweepDeg) ? sweepDeg : 180) * (Math.PI / 180),
+          baseline,
+        })
+        editor.updateEntity(
+          id,
+          { path: placed.path, position: placed.position } as Partial<Entity>,
+          'ins-arc',
+        )
+        refreshHotFromSelection(editor, store)
+        return
+      }
+      const r = Number.isFinite(radius) && radius > 0 ? radius : te.path.radius
+      const startAngle = (Number.isFinite(startDeg) ? startDeg : -90) * (Math.PI / 180)
+      const sweep = (Number.isFinite(sweepDeg) ? sweepDeg : 180) * (Math.PI / 180)
+      const midAngle = te.path.startAngle + te.path.sweep / 2
+      const apex = {
+        x: te.position.x + te.path.radius * Math.cos(midAngle),
+        y: te.position.y + te.path.radius * Math.sin(midAngle),
+      }
+      const newMid = startAngle + sweep / 2
+      const position = {
+        x: apex.x - r * Math.cos(newMid),
+        y: apex.y - r * Math.sin(newMid),
+      }
       editor.updateEntity(
         id,
         {
-          path: {
-            kind: 'arc',
-            radius: Number.isFinite(radius) && radius > 0 ? radius : Math.max(40, te.fontSize * 4),
-            startAngle: (Number.isFinite(startDeg) ? startDeg : -90) * (Math.PI / 180),
-            sweep: (Number.isFinite(sweepDeg) ? sweepDeg : 180) * (Math.PI / 180),
-            baseline,
-          },
+          position,
+          path: { kind: 'arc', radius: r, startAngle, sweep, baseline },
         } as Partial<Entity>,
         'ins-arc',
       )

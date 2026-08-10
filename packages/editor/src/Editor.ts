@@ -30,6 +30,8 @@ import {
 import {
   Camera2D,
   applyAffineToEntity,
+  booleanEntities,
+  entitySupportsBoolean,
   entityWorldBounds,
   offsetEntities,
   RASTER_DPI,
@@ -38,6 +40,8 @@ import {
   resolveWorldMatrix,
   scale as scaleMatrix,
   svgUserUnitsToWorld,
+  type BooleanOp,
+  type BooleanOptions,
   type LengthUnit as GeomUnit,
   type OffsetOptions,
 } from '@cadkit/geometry'
@@ -775,6 +779,82 @@ export class Editor {
       paths: contours.map((c) => ({
         points: c.points.map((p) => worldPoint(p.x, p.y)),
         closed: c.closed,
+      })),
+    })
+    return contours.length
+  }
+
+  /** Closed shapes in the current selection that can participate in boolean ops. */
+  getBooleanSelection(): Entity[] {
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    return this.selection
+      .toArray()
+      .map((id) => this.document.getEntity(id))
+      .filter((e): e is Entity => !!e && entitySupportsBoolean(e, lookup))
+  }
+
+  /**
+   * Boolean-combine selected closed shapes (undoable).
+   * Removes sources and creates result polylines. Subtract: first − rest.
+   */
+  booleanSelection(op: BooleanOp, options?: BooleanOptions): EntityId[] {
+    const entities = this.getBooleanSelection()
+    if (entities.length < 2) return []
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    const contours = booleanEntities(entities, op, lookup, options)
+    if (!contours.length) return []
+
+    const style = {
+      stroke: entities[0]!.style.stroke ?? '#2563eb',
+      strokeWidth: entities[0]!.style.strokeWidth ?? 1,
+      fill: entities[0]!.style.fill ?? 'none',
+      opacity: entities[0]!.style.opacity,
+    }
+    const layerId = entities[0]!.layerId || this.document.getDefaultLayerId()
+    const created: Entity[] = contours.map((c) => ({
+      id: createEntityId('polyline'),
+      type: 'polyline' as const,
+      layerId,
+      style: { ...style },
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      points: c.points,
+      closed: true,
+    }))
+
+    const cmds = [
+      ...entities.map((e) => new RemoveEntityCommand(e.id)),
+      ...created.map((entity) => new AddEntityCommand(entity)),
+    ]
+    const change = this.history.execute(new BatchCommand(cmds))
+    this.commitSceneChange(change)
+    const newIds = created.map((e) => e.id)
+    this.selection.set(newIds)
+    this.events.emit('selection:change', { ids: newIds })
+    this.clearPreview()
+    this.refreshHandles()
+    this.requestRender()
+    return newIds
+  }
+
+  /** Preview boolean result for the current selection without committing. */
+  previewBooleanSelection(op: BooleanOp, options?: BooleanOptions): number {
+    const entities = this.getBooleanSelection()
+    if (entities.length < 2) {
+      this.clearPreview()
+      return 0
+    }
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    const contours = booleanEntities(entities, op, lookup, options)
+    if (!contours.length) {
+      this.clearPreview()
+      return 0
+    }
+    this.setPreview({
+      kind: 'paths',
+      paths: contours.map((c) => ({
+        points: c.points.map((p) => worldPoint(p.x, p.y)),
+        closed: true,
       })),
     })
     return contours.length

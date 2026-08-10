@@ -82,7 +82,7 @@ function iconBtn(
 
 export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore): () => void {
   const render = () => {
-    const { tool, canUndo, canRedo } = store.get()
+    const { tool } = store.get()
 
     const toolBtns = TOOLS.map((def) => {
       const label = `${t(def.labelKey)} (${def.shortcut})`
@@ -100,13 +100,6 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
         <div class="mb-2 grid h-10 w-10 place-items-center rounded-xl bg-brand shadow-sm shadow-brand/30" title="${escapeAttr(t('appTitle'))}" aria-hidden="true">${LOGO}</div>
         <div class="mb-1 h-px w-7 bg-neutral-300"></div>
         ${toolBtns}
-        <div class="my-1 h-px w-7 bg-neutral-300" role="separator"></div>
-        ${iconBtn('data-action="group"', ICONS.group, t('group'), t('tipGroup'))}
-        ${iconBtn('data-action="ungroup"', ICONS.ungroup, t('ungroup'), t('tipUngroup'))}
-      </div>
-      <div class="flex shrink-0 flex-col items-center gap-1 border-t border-line px-2 py-2">
-        ${iconBtn(`data-action="undo" ${canUndo ? '' : 'disabled'}`, ICONS.undo, t('undo'), 'Ctrl+Z / ⌘Z')}
-        ${iconBtn(`data-action="redo" ${canRedo ? '' : 'disabled'}`, ICONS.redo, t('redo'), 'Ctrl+Shift+Z / ⌘⇧Z')}
       </div>
     `
 
@@ -122,25 +115,7 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
         editor.setTool(btn.dataset.tool as ToolName)
       })
     })
-    el.querySelector<HTMLButtonElement>('[data-action="group"]')?.addEventListener('click', () => {
-      const ids = editor.selection.toArray()
-      if (ids.length >= 2) editor.group(ids)
-    })
-    el.querySelector<HTMLButtonElement>('[data-action="ungroup"]')?.addEventListener('click', () => {
-      for (const id of editor.selection.toArray()) {
-        const e = editor.document.getEntity(id)
-        if (e?.type === 'group') editor.ungroup(id)
-      }
-    })
-    el.querySelector<HTMLButtonElement>('[data-action="undo"]')?.addEventListener('click', () => {
-      editor.undo()
-      store.set({ canUndo: editor.canUndo(), canRedo: editor.canRedo() })
-    })
-    el.querySelector<HTMLButtonElement>('[data-action="redo"]')?.addEventListener('click', () => {
-      editor.redo()
-      store.set({ canUndo: editor.canUndo(), canRedo: editor.canRedo() })
-    })
   }
 
-  return store.subscribeKeys(['tool', 'canUndo', 'canRedo', 'localeTick'], render)
+  return store.subscribeKeys(['tool', 'localeTick'], render)
 }

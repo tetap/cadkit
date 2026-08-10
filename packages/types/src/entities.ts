@@ -145,7 +145,7 @@ export interface TextArcPath {
 export interface TextEntity extends EntityBase {
   type: 'text'
   content: string
-  /** Baseline origin for straight text; circle center when `path.kind === 'arc'`. */
+  /** Em-box bottom of the first line for straight text; circle center when `path.kind === 'arc'`. */
   position: Vec2
   fontFamily: string
   fontSize: number

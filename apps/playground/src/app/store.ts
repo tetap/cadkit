@@ -44,6 +44,8 @@ export interface AppState {
   uiEpoch: number
   /** Bumped when layers are added/edited so the layers panel refreshes. */
   layerEpoch: number
+  /** Left floating layers dock visibility. */
+  layersOpen: boolean
 }
 
 export type AppStore = {
@@ -56,7 +58,7 @@ export type AppStore = {
 
 export const DEFAULT_HOT: HotProps = {
   stroke: '#222222',
-  fill: '#00000000',
+  fill: '#222222',
   opacity: 1,
   strokeWidth: 1,
   x: 0,
@@ -86,6 +88,7 @@ export function createAppStore(initial?: Partial<AppState>): AppStore {
     localeTick: 0,
     uiEpoch: 0,
     layerEpoch: 0,
+    layersOpen: false,
   }
   if (initial) {
     state = {

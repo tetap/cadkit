@@ -66,6 +66,10 @@ export function entityLocalBounds(entity: Entity): AABB {
   }
 }
 
+/**
+ * Match TextOverlay: `position` is the first line's em-box bottom (CSS
+ * line-height:1, transform-origin at bottom). Y grows downward.
+ */
 function straightTextLocalBounds(entity: Extract<Entity, { type: 'text' }>): AABB {
   const fontSize = entity.fontSize
   const fontFamily = entity.fontFamily || 'sans-serif'
@@ -74,50 +78,27 @@ function straightTextLocalBounds(entity: Extract<Entity, { type: 'text' }>): AAB
   const lines = entity.content.split(/\r?\n/u)
   const lineCount = Math.max(1, lines.length)
 
-  if (!entity.content) {
-    return createAABB(
-      entity.position.x,
-      entity.position.y - fontSize,
-      entity.position.x,
-      entity.position.y,
-    )
-  }
-
   let minX = Infinity
-  let minY = Infinity
   let maxX = -Infinity
-  let maxY = -Infinity
 
   for (let i = 0; i < lineCount; i++) {
     const line = lines[i] ?? ''
-    const m = measureTextLine(line, fontSize, fontFamily)
-    const advance = m.advance * wf
-    const baseline = entity.position.y + i * fontSize
-
+    const advance = measureTextLine(line, fontSize, fontFamily).advance * wf
     let lineLeft = entity.position.x
     if (align === 'center') lineLeft = entity.position.x - advance / 2
     else if (align === 'right') lineLeft = entity.position.x - advance
-
-    const left = lineLeft + m.inkLeft * wf
-    const right = lineLeft + m.inkRight * wf
-    const top = baseline - m.ascent
-    const bottom = baseline + m.descent
-
-    minX = Math.min(minX, left, lineLeft)
-    maxX = Math.max(maxX, right, lineLeft + advance)
-    minY = Math.min(minY, top)
-    maxY = Math.max(maxY, bottom)
+    minX = Math.min(minX, lineLeft)
+    maxX = Math.max(maxX, lineLeft + advance)
   }
 
   if (!Number.isFinite(minX)) {
-    return createAABB(
-      entity.position.x,
-      entity.position.y - fontSize,
-      entity.position.x,
-      entity.position.y,
-    )
+    minX = entity.position.x
+    maxX = entity.position.x
   }
-  return createAABB(minX, minY, maxX, maxY)
+
+  const top = entity.position.y - fontSize
+  const bottom = entity.position.y + (lineCount - 1) * fontSize
+  return createAABB(minX, top, maxX, bottom)
 }
 
 export function transformAABB(box: AABB, m: Matrix3): AABB {

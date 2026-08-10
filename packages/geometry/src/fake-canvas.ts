@@ -201,13 +201,14 @@ export function installFakeCanvas(): () => void {
   }
   const prevOffscreen = g.OffscreenCanvas
   const prevDoc = g.document
-  g.OffscreenCanvas = undefined
+  // Test-only shims; cast past DOM lib strictness.
+  g.OffscreenCanvas = undefined as unknown as typeof OffscreenCanvas
   g.document = {
     createElement(tag: string) {
       if (tag === 'canvas') return new FakeCanvas()
-      return prevDoc?.createElement?.(tag)
+      return prevDoc?.createElement?.(tag) ?? ({} as HTMLElement)
     },
-  }
+  } as Document
   return () => {
     g.OffscreenCanvas = prevOffscreen
     g.document = prevDoc

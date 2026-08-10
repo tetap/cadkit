@@ -73,7 +73,6 @@ export class TextOverlay {
   private draftEl: HTMLDivElement | null = null
   private caretEl: HTMLDivElement | null = null
   private selLayer: HTMLDivElement | null = null
-  private guideEl: SVGSVGElement | null = null
   private draft: TextDraftState | null = null
   private editingId: EntityId | null = null
 
@@ -216,7 +215,6 @@ export class TextOverlay {
       }
     }
     this.renderDraft(camera)
-    this.renderArcGuide(entities, camera)
   }
 
   clear(): void {
@@ -225,11 +223,9 @@ export class TextOverlay {
     this.draftEl?.remove()
     this.caretEl?.remove()
     this.selLayer?.remove()
-    this.guideEl?.remove()
     this.draftEl = null
     this.caretEl = null
     this.selLayer = null
-    this.guideEl = null
     this.draft = null
     this.editingId = null
   }
@@ -816,63 +812,4 @@ export class TextOverlay {
     return best
   }
 
-  private renderArcGuide(entities: readonly Entity[], camera: Camera2D): void {
-    const arcs = entities.filter(
-      (e): e is TextEntity =>
-        e.type === 'text' &&
-        e.path?.kind === 'arc' &&
-        e.style.visible !== false &&
-        !(this.editingId && e.id === this.editingId),
-    )
-    const draftArc = this.draft?.path?.kind === 'arc' ? this.draft : null
-    if (arcs.length === 0 && !draftArc) {
-      if (this.guideEl) this.guideEl.style.display = 'none'
-      return
-    }
-    if (!this.guideEl) {
-      this.guideEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-      Object.assign(this.guideEl.style, {
-        position: 'absolute',
-        inset: '0',
-        width: '100%',
-        height: '100%',
-        overflow: 'visible',
-        pointerEvents: 'none',
-      } as Partial<CSSStyleDeclaration>)
-      this.root.appendChild(this.guideEl)
-    }
-    this.guideEl.style.display = 'block'
-    this.guideEl.replaceChildren()
-    const draw = (center: { x: number; y: number }, path: TextArcPath) => {
-      const r = Math.max(1e-3, path.radius)
-      const a0 = path.startAngle
-      const a1 = path.startAngle + path.sweep
-      const p0 = camera.worldToScreen({
-        x: center.x + r * Math.cos(a0),
-        y: center.y + r * Math.sin(a0),
-        __space: 'world',
-      })
-      const p1 = camera.worldToScreen({
-        x: center.x + r * Math.cos(a1),
-        y: center.y + r * Math.sin(a1),
-        __space: 'world',
-      })
-      const zoom = camera.getState().zoom
-      const rr = r * zoom
-      const large = Math.abs(path.sweep) > Math.PI ? 1 : 0
-      const sweepFlag = path.sweep < 0 ? 0 : 1
-      const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-      pathEl.setAttribute(
-        'd',
-        `M ${p0.x} ${p0.y} A ${rr} ${rr} 0 ${large} ${sweepFlag} ${p1.x} ${p1.y}`,
-      )
-      pathEl.setAttribute('fill', 'none')
-      pathEl.setAttribute('stroke', '#60a5fa')
-      pathEl.setAttribute('stroke-width', '1.25')
-      pathEl.setAttribute('opacity', '0.85')
-      this.guideEl!.appendChild(pathEl)
-    }
-    for (const e of arcs) draw(e.position, e.path!)
-    if (draftArc) draw(draftArc.world, draftArc.path!)
-  }
 }

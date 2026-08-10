@@ -18,6 +18,9 @@ export const ICONS = {
   ungroup: icon('<rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/><path d="M15 7h2v2M7 15v2h2"/>'),
   undo: icon('<path d="m9 7-5 5 5 5"/><path d="M4 12h10a6 6 0 0 1 6 6"/>'),
   redo: icon('<path d="m15 7 5 5-5 5"/><path d="M20 12H10a6 6 0 0 0-6 6"/>'),
+  layers: icon(
+    '<path d="m12 2 9 4.5-9 4.5L3 6.5 12 2Z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 17.5 9 4.5 9-4.5"/>',
+  ),
 } as const
 
 export type IconName = keyof typeof ICONS

@@ -82,6 +82,13 @@ export type MessageKey =
   | 'cancel'
   | 'confirm'
   | 'offsetNeedSelection'
+  | 'boolean'
+  | 'booleanUnion'
+  | 'booleanSubtract'
+  | 'booleanIntersect'
+  | 'booleanExclude'
+  | 'booleanNeedSelection'
+  | 'tipBooleanSubtract'
   | 'curveText'
   | 'curveTextEnable'
   | 'curveTextHint'
@@ -281,9 +288,16 @@ const zh: Record<MessageKey, string> = {
   cancel: '取消',
   confirm: '确认',
   offsetNeedSelection: '请先选择要偏移的对象',
+  boolean: '布尔',
+  booleanUnion: '并集',
+  booleanSubtract: '差集',
+  booleanIntersect: '交集',
+  booleanExclude: '异或',
+  booleanNeedSelection: '请先多选至少两个封闭图形',
+  tipBooleanSubtract: '差集：第一个选中对象减去其余对象',
   curveText: '曲线文本',
   curveTextEnable: '沿圆弧排布',
-  curveTextHint: '开启后文字按圆弧逐字旋转；半径、起止角可实时预览。',
+  curveTextHint: '开启后以文字中心为基准生成默认半径圆弧，字串中点落在弧顶；半径、起止角可调。',
   settings: '设置',
   settingsDocument: '文档',
   settingsGuides: '辅助显示',
@@ -295,7 +309,7 @@ const zh: Record<MessageKey, string> = {
   svgDpi: 'SVG DPI',
   settingsDpiReset: '恢复默认 (96 / 72)',
   layers: '图层',
-  layersHint: '点击设为当前图层；改颜色可区分不同图层上的对象。',
+  layersHint: '左侧悬浮面板列出图层与画布元素；点击元素可同步选中。',
   layer: '图层',
   layerAdd: '新建图层',
   layerDelete: '删除图层',
@@ -482,9 +496,16 @@ const en: Record<MessageKey, string> = {
   cancel: 'Cancel',
   confirm: 'Confirm',
   offsetNeedSelection: 'Select an object to offset',
+  boolean: 'Boolean',
+  booleanUnion: 'Union',
+  booleanSubtract: 'Subtract',
+  booleanIntersect: 'Intersect',
+  booleanExclude: 'Exclude',
+  booleanNeedSelection: 'Select at least two closed shapes',
+  tipBooleanSubtract: 'Subtract: first selected minus the rest',
   curveText: 'Curve text',
   curveTextEnable: 'Follow arc',
-  curveTextHint: 'Glyphs follow a circular arc with per-character rotation.',
+  curveTextHint: 'Places an arc around the text center (midpoint on the apex). Radius and angles are adjustable.',
   settings: 'Settings',
   settingsDocument: 'Document',
   settingsGuides: 'Guides',
@@ -496,7 +517,7 @@ const en: Record<MessageKey, string> = {
   svgDpi: 'SVG DPI',
   settingsDpiReset: 'Reset defaults (96 / 72)',
   layers: 'Layers',
-  layersHint: 'Click to activate; set a color to distinguish objects on each layer.',
+  layersHint: 'Left dock lists layers and canvas objects; click an object to select it.',
   layer: 'Layer',
   layerAdd: 'Add layer',
   layerDelete: 'Delete layer',

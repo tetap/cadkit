@@ -73,10 +73,16 @@ function nextLayerColor(index: number): string {
   return LAYER_PALETTE[index % LAYER_PALETTE.length]!
 }
 
-export function layerFillFromStroke(stroke: string, alphaHex = '40'): string {
-  if (/^#[0-9a-fA-F]{6}$/.test(stroke)) return `${stroke}${alphaHex}`
-  if (/^#[0-9a-fA-F]{8}$/.test(stroke)) return stroke.slice(0, 7) + alphaHex
-  return '#32cd7940'
+/** Derive a solid fill from a stroke/layer color (optional alpha hex overrides opacity). */
+export function layerFillFromStroke(stroke: string, alphaHex = 'ff'): string {
+  if (/^#[0-9a-fA-F]{6}$/.test(stroke)) {
+    return alphaHex.toLowerCase() === 'ff' ? stroke : `${stroke}${alphaHex}`
+  }
+  if (/^#[0-9a-fA-F]{8}$/.test(stroke)) {
+    const base = stroke.slice(0, 7)
+    return alphaHex.toLowerCase() === 'ff' ? base : base + alphaHex
+  }
+  return '#32cd79'
 }
 
 export class CadDocument {

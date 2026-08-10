@@ -26,6 +26,11 @@
       <section class="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div id="canvas-host" class="canvas-host">
           <canvas id="view" aria-label="Canvas"></canvas>
+          <aside
+            id="layers-panel"
+            class="pointer-events-none absolute inset-y-0 left-0 z-20 hidden w-[260px]"
+            aria-label="Layers"
+          ></aside>
           <div
             id="context-bar"
             class="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-4"
@@ -41,13 +46,13 @@
         </div>
       </section>
 
-      <!-- Right: file chrome + reserved slot (no element inspector) -->
+      <!-- Right: file chrome + status (layers dock floats over canvas) -->
       <aside
-        class="flex w-[280px] shrink-0 flex-col border-l border-line bg-panel"
+        class="flex w-[240px] shrink-0 flex-col border-l border-line bg-panel"
         aria-label="Sidebar"
       >
         <header id="app-bar" class="shrink-0 border-b border-line" role="banner"></header>
-        <div id="side-slot" class="min-h-0 flex-1 overflow-y-auto p-3" aria-label="Side panel"></div>
+        <div class="min-h-0 flex-1"></div>
         <div
           id="status-bar"
           class="shrink-0 border-t border-line px-3 py-2 text-[11px] text-muted"

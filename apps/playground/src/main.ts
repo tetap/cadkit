@@ -16,8 +16,8 @@ const canvas = document.querySelector<HTMLCanvasElement>('#view')!
 const canvasHost = document.querySelector<HTMLElement>('#canvas-host')!
 const appBarEl = document.querySelector<HTMLElement>('#app-bar')!
 const toolRailEl = document.querySelector<HTMLElement>('#tool-rail')!
+const layersPanelEl = document.querySelector<HTMLElement>('#layers-panel')!
 const contextBarEl = document.querySelector<HTMLElement>('#context-bar')!
-const sideSlotEl = document.querySelector<HTMLElement>('#side-slot')!
 const viewBarEl = document.querySelector<HTMLElement>('#view-bar')!
 const statusBarEl = document.querySelector<HTMLElement>('#status-bar')!
 const devModal = document.querySelector<HTMLElement>('#dev-modal')!
@@ -67,8 +67,8 @@ async function boot(): Promise<void> {
     },
   })
   mountToolRail(toolRailEl, editor, store)
+  mountLayersPanel(layersPanelEl, editor, store)
   mountContextBar(contextBarEl, editor, store)
-  mountLayersPanel(sideSlotEl, editor, store)
   mountViewBar(viewBarEl, editor, store)
   mountStatusBar(statusBarEl, editor, store)
 

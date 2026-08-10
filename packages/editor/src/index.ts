@@ -23,7 +23,10 @@ export {
   RASTER_DPI,
   SVG_DPI,
   UNIT_LABEL,
+  booleanOpsAvailable,
   type OffsetOptions,
   type OffsetDirection,
   type OffsetJoin,
+  type BooleanOp,
+  type BooleanOptions,
 } from '@cadkit/geometry'

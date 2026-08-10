@@ -1,11 +1,19 @@
-import type { Editor } from '@cadkit/editor'
+import type { BooleanOp, Editor } from '@cadkit/editor'
 import type { Entity, ImageEntity } from '@cadkit/types'
 import type { AppStore } from '../app/store.js'
 import { refreshHotFromSelection } from '../bindEditorEvents.js'
-import { t } from '../i18n/index.js'
+import { t, type MessageKey } from '../i18n/index.js'
 import { openCurveTextDialog } from './CurveTextDialog.js'
+import { ICONS } from './icons.js'
 import { openOffsetDialog } from './OffsetDialog.js'
 import { btnGhost, fieldControl, fieldLabel } from './tokens.js'
+
+const BOOL_OPS: Array<{ op: BooleanOp; label: MessageKey; tip: MessageKey }> = [
+  { op: 'union', label: 'booleanUnion', tip: 'booleanUnion' },
+  { op: 'subtract', label: 'booleanSubtract', tip: 'tipBooleanSubtract' },
+  { op: 'intersect', label: 'booleanIntersect', tip: 'booleanIntersect' },
+  { op: 'exclude', label: 'booleanExclude', tip: 'booleanExclude' },
+]
 
 function applyHotStyle(editor: Editor, store: AppStore, patch: Record<string, unknown>): void {
   const ids = store.get().selectionIds
@@ -118,9 +126,12 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     const { hot, selectionIds } = store.get()
     const disabled = selectionIds.length === 0
     const single = selectionIds.length === 1
+    const multi = selectionIds.length >= 2
     const showText = hot.entityType === 'text'
     const showSize = single && hot.entityType !== 'text' && hot.entityType !== null
     const geoDisabled = !single
+    const canUngroup = selectionIds.some((id) => editor.document.getEntity(id)?.type === 'group')
+    const canBoolean = editor.getBooleanSelection().length >= 2
 
     // Match ViewBar: hide the floating pill when nothing is selected.
     if (disabled) {
@@ -151,12 +162,6 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
             : ''
         }
         <span class="mx-0.5 h-6 w-px shrink-0 bg-line" aria-hidden="true"></span>
-        <label class="${fieldLabel}">${t('stroke')}
-          <input type="color" id="ctx-stroke" class="h-8 w-10 cursor-pointer rounded border border-neutral-300 bg-white p-0.5" value="${toColorInput(hot.stroke)}" />
-        </label>
-        <label class="${fieldLabel}">${t('fill')}
-          <input type="color" id="ctx-fill" class="h-8 w-10 cursor-pointer rounded border border-neutral-300 bg-white p-0.5" value="${toColorInput(hot.fill)}" />
-        </label>
         <label class="${fieldLabel}">${t('opacity')}
           <input type="number" id="ctx-opacity" class="${fieldControl} w-16" min="0" max="1" step="0.05" value="${hot.opacity}" />
         </label>
@@ -182,6 +187,34 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
           </svg>
           ${t('offset')}
         </button>
+        ${
+          canBoolean
+            ? `<span class="mx-0.5 h-6 w-px shrink-0 bg-line" aria-hidden="true"></span>
+              <span class="shrink-0 text-[11px] text-muted">${t('boolean')}</span>
+              ${BOOL_OPS.map(
+                (b) => `
+                <button type="button" data-bool="${b.op}" class="${btnGhost} !px-2" title="${t(b.tip)}">
+                  ${t(b.label)}
+                </button>`,
+              ).join('')}`
+            : ''
+        }
+        ${
+          multi
+            ? `<button type="button" id="ctx-group" class="${btnGhost} gap-1.5 [&_svg]:h-4 [&_svg]:w-4" title="${t('tipGroup')}">
+                ${ICONS.group}
+                ${t('group')}
+              </button>`
+            : ''
+        }
+        ${
+          canUngroup
+            ? `<button type="button" id="ctx-ungroup" class="${btnGhost} gap-1.5 [&_svg]:h-4 [&_svg]:w-4" title="${t('tipUngroup')}">
+                ${ICONS.ungroup}
+                ${t('ungroup')}
+              </button>`
+            : ''
+        }
         <span class="shrink-0 pl-1 text-xs text-muted">
           ${selectionIds.length} ${t('selected')}
         </span>
@@ -191,12 +224,6 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     for (const key of ['#ctx-x', '#ctx-y', '#ctx-w', '#ctx-h']) {
       el.querySelector(key)?.addEventListener('change', () => applyGeometry(editor, store, el))
     }
-    el.querySelector('#ctx-stroke')?.addEventListener('input', (ev) => {
-      applyHotStyle(editor, store, { stroke: (ev.target as HTMLInputElement).value })
-    })
-    el.querySelector('#ctx-fill')?.addEventListener('input', (ev) => {
-      applyHotStyle(editor, store, { fill: (ev.target as HTMLInputElement).value })
-    })
     el.querySelector('#ctx-opacity')?.addEventListener('change', (ev) => {
       const v = Number((ev.target as HTMLInputElement).value)
       if (Number.isFinite(v)) applyHotStyle(editor, store, { opacity: v })
@@ -244,6 +271,34 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
         refreshHotFromSelection(editor, store)
       })
     })
+    el.querySelectorAll<HTMLButtonElement>('[data-bool]').forEach((btn) => {
+      const op = btn.dataset.bool as BooleanOp
+      btn.addEventListener('mouseenter', () => {
+        editor.previewBooleanSelection(op)
+      })
+      btn.addEventListener('mouseleave', () => {
+        editor.clearPreview()
+      })
+      btn.addEventListener('click', () => {
+        const ids = editor.booleanSelection(op)
+        if (!ids.length) {
+          store.set({ status: t('booleanNeedSelection') })
+          return
+        }
+        refreshHotFromSelection(editor, store)
+        store.set({ status: t('ready') })
+      })
+    })
+    el.querySelector('#ctx-group')?.addEventListener('click', () => {
+      const ids = store.get().selectionIds
+      if (ids.length >= 2) editor.group(ids)
+    })
+    el.querySelector('#ctx-ungroup')?.addEventListener('click', () => {
+      for (const id of store.get().selectionIds) {
+        const e = editor.document.getEntity(id)
+        if (e?.type === 'group') editor.ungroup(id)
+      }
+    })
   }
 
   const unsub = store.subscribeKeys(['hot', 'selectionIds', 'localeTick', 'uiEpoch'], render)
@@ -252,11 +307,4 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     closeCurve()
     unsub()
   }
-}
-
-function toColorInput(value: string): string {
-  if (/^#[0-9a-fA-F]{6}$/.test(value)) return value
-  if (/^#[0-9a-fA-F]{8}$/.test(value)) return value.slice(0, 7)
-  if (value === 'none' || value === 'transparent' || value.endsWith('00')) return '#000000'
-  return '#222222'
 }

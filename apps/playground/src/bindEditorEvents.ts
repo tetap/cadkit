@@ -6,9 +6,45 @@ import { DEFAULT_HOT } from './app/store.js'
 import { t } from './i18n/index.js'
 import { pickImageFile } from './pick-file.js'
 
+function selectionHotBounds(editor: Editor, ids: EntityId[]): Pick<HotProps, 'x' | 'y' | 'width' | 'height'> {
+  const box = editor.tools.getSelectionFrameAABB()
+  if (box) {
+    return {
+      x: box.minX,
+      y: box.minY,
+      width: box.maxX - box.minX,
+      height: box.maxY - box.minY,
+    }
+  }
+  // Fallback if the tool frame is unavailable during a store sync.
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const id of ids) {
+    const b = editor.document.getBounds(id)
+    if (!b) continue
+    minX = Math.min(minX, b.minX)
+    minY = Math.min(minY, b.minY)
+    maxX = Math.max(maxX, b.maxX)
+    maxY = Math.max(maxY, b.maxY)
+  }
+  if (!Number.isFinite(minX)) {
+    return { x: 0, y: 0, width: 0, height: 0 }
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
+
 function readHot(editor: Editor, ids: EntityId[]): HotProps {
+  if (ids.length === 0) {
+    return { ...DEFAULT_HOT, entityType: null }
+  }
   if (ids.length !== 1) {
-    return { ...DEFAULT_HOT, entityType: ids.length ? 'multi' : null }
+    return {
+      ...DEFAULT_HOT,
+      ...selectionHotBounds(editor, ids),
+      entityType: 'multi',
+    }
   }
   const e = editor.document.getEntity(ids[0]!)
   if (!e) return { ...DEFAULT_HOT }

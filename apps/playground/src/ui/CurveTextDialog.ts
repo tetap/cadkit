@@ -1,17 +1,8 @@
 import type { Editor } from '@cadkit/editor'
+import { placeArcTextCentered, placeStraightTextFromArc } from '@cadkit/geometry'
 import type { Entity, EntityId, TextArcPath, TextEntity } from '@cadkit/types'
 import { t } from '../i18n/index.js'
 import { btnGhost, fieldControl, fieldLabel } from './tokens.js'
-
-function defaultArc(fontSize: number): TextArcPath {
-  return {
-    kind: 'arc',
-    radius: Math.max(20, fontSize * 4),
-    startAngle: -Math.PI * 0.75,
-    sweep: Math.PI * 1.5,
-    baseline: 'outer',
-  }
-}
 
 /**
  * Floating panel to enable / tune curve (arc) text for the selected TextEntity.
@@ -34,9 +25,20 @@ export function openCurveTextDialog(
     return e?.type === 'text' ? (e as TextEntity) : null
   }
 
-  const applyPath = (path: TextArcPath | undefined) => {
-    editor.updateEntity(entityId, { path } as Partial<Entity>, 'curve-text')
-    // Keep selection frame in sync with arc glyph bounds.
+  const applyArc = (path: TextArcPath, position: { x: number; y: number }) => {
+    editor.updateEntity(entityId, { path, position } as Partial<Entity>, 'curve-text')
+    editor.requestRender()
+  }
+
+  const applyStraight = () => {
+    const te = readEntity()
+    if (!te) return
+    const next = placeStraightTextFromArc(te)
+    editor.updateEntity(
+      entityId,
+      { path: undefined, position: next.position } as Partial<Entity>,
+      'curve-text-off',
+    )
     editor.requestRender()
   }
 
@@ -49,9 +51,9 @@ export function openCurveTextDialog(
     }
     const arc = te.path?.kind === 'arc' ? te.path : null
     const enabled = !!arc
-    const radius = arc?.radius ?? Math.max(20, te.fontSize * 4)
-    const startDeg = arc ? ((arc.startAngle * 180) / Math.PI).toFixed(0) : '-135'
-    const sweepDeg = arc ? ((arc.sweep * 180) / Math.PI).toFixed(0) : '270'
+    const radius = arc?.radius ?? Math.max(20, te.fontSize * 2.5)
+    const startDeg = arc ? ((arc.startAngle * 180) / Math.PI).toFixed(0) : '-90'
+    const sweepDeg = arc ? ((arc.sweep * 180) / Math.PI).toFixed(0) : '180'
     const baseline = arc?.baseline ?? 'outer'
 
     root.innerHTML = `
@@ -106,27 +108,48 @@ export function openCurveTextDialog(
 
     const writeFromFields = () => {
       const te2 = readEntity()
-      if (!te2) return
+      if (!te2?.path || te2.path.kind !== 'arc') return
       const r = Number((root.querySelector('#ct-r-num') as HTMLInputElement | null)?.value)
       const start = Number((root.querySelector('#ct-start') as HTMLInputElement | null)?.value)
       const sweep = Number((root.querySelector('#ct-sweep') as HTMLInputElement | null)?.value)
       const base = ((root.querySelector('#ct-base') as HTMLSelectElement | null)?.value ??
         'outer') as 'outer' | 'inner'
-      applyPath({
-        kind: 'arc',
-        radius: Number.isFinite(r) && r > 0 ? r : Math.max(20, te2.fontSize * 4),
-        startAngle: (Number.isFinite(start) ? start : -135) * (Math.PI / 180),
-        sweep: (Number.isFinite(sweep) ? sweep : 270) * (Math.PI / 180),
-        baseline: base,
-      })
+      const radius = Number.isFinite(r) && r > 0 ? r : te2.path.radius
+      const startAngle = (Number.isFinite(start) ? start : -90) * (Math.PI / 180)
+      const sweepRad = (Number.isFinite(sweep) ? sweep : 180) * (Math.PI / 180)
+      // Keep the current arc midpoint fixed while editing radius/angles.
+      const midAngle = te2.path.startAngle + te2.path.sweep / 2
+      const apex = {
+        x: te2.position.x + te2.path.radius * Math.cos(midAngle),
+        y: te2.position.y + te2.path.radius * Math.sin(midAngle),
+      }
+      const newMid = startAngle + sweepRad / 2
+      const position = {
+        x: apex.x - radius * Math.cos(newMid),
+        y: apex.y - radius * Math.sin(newMid),
+      }
+      applyArc(
+        {
+          kind: 'arc',
+          radius,
+          startAngle,
+          sweep: sweepRad,
+          baseline: base,
+        },
+        position,
+      )
     }
 
     root.querySelector('#ct-enable')?.addEventListener('change', (ev) => {
       const on = (ev.target as HTMLInputElement).checked
       const te2 = readEntity()
       if (!te2) return
-      if (on) applyPath(te2.path?.kind === 'arc' ? te2.path : defaultArc(te2.fontSize))
-      else applyPath(undefined)
+      if (on) {
+        const placed = placeArcTextCentered(te2)
+        applyArc(placed.path, placed.position)
+      } else {
+        applyStraight()
+      }
       render()
     })
 

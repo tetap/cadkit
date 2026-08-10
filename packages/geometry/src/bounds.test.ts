@@ -74,7 +74,7 @@ describe('bounds', () => {
     expect(w).toEqual(entityLocalBounds(e))
   })
 
-  it('uses full-width CJK advances and baseline-aligned text bounds', () => {
+  it('uses full-width CJK advances and em-box text bounds', () => {
     expect(estimateTextAdvance('A中', 10)).toBeCloseTo(15.5)
     const text = entityLocalBounds({
       id: createEntityId(),
@@ -90,11 +90,11 @@ describe('bounds', () => {
       align: 'center',
     })
     const width = estimateTextAdvance('CADKit 编辑器', 20)
-    // Fallback metrics pad ink horizontally and include descent below the baseline.
-    expect(text.minX).toBeLessThan(100 - width / 2 + 1e-6)
-    expect(text.maxX).toBeGreaterThan(100 + width / 2 - 1e-6)
-    expect(text.minY).toBeLessThan(80)
-    expect(text.maxY).toBeGreaterThan(80 - 1e-6)
+    // Em-box: top = baseline - fontSize, bottom = baseline (matches TextOverlay).
+    expect(text.minX).toBeCloseTo(100 - width / 2, 5)
+    expect(text.maxX).toBeCloseTo(100 + width / 2, 5)
+    expect(text.minY).toBeCloseTo(60, 5)
+    expect(text.maxY).toBeCloseTo(80, 5)
   })
 
   it('uses the longest line and all line heights for multiline text', () => {
@@ -110,11 +110,10 @@ describe('bounds', () => {
       fontFamily: 'sans-serif',
       fontSize: 10,
     })
-    expect(text.minX).toBeLessThanOrEqual(10)
-    // Ascent may be slightly under 1em; still covers the glyph above baseline.
-    expect(text.minY).toBeLessThan(20)
+    expect(text.minX).toBeCloseTo(10, 5)
+    expect(text.minY).toBeCloseTo(10, 5)
     expect(text.maxX - text.minX).toBeGreaterThanOrEqual(40)
-    expect(text.maxY).toBeGreaterThan(30 - 1e-6)
+    expect(text.maxY).toBeCloseTo(30, 5)
   })
 
   it('bounds arc text from glyph quads', () => {
