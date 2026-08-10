@@ -118,6 +118,10 @@ function angleInSweep(angle: number, start: number, end: number): boolean {
 /**
  * Pick the topmost entity whose (optionally padded) world AABB contains the point.
  * Stack order: higher scene pickId wins (later-created / upper in draw stack).
+ *
+ * Groups are hittable via their aggregated child AABB (empty space inside the
+ * group frame). Leaf geometry still wins over a containing group so edit-mode
+ * can target children; object-mode callers promote via resolveGroupRoot.
  */
 export function pickEntity(ctx: PickContext, world: WorldPoint, _screen: ScreenPoint): EntityId | null {
   const zoom = ctx.camera.getState().zoom
@@ -130,22 +134,40 @@ export function pickEntity(ctx: PickContext, world: WorldPoint, _screen: ScreenP
     maxY: world.y + pad,
   })
 
-  let best: EntityId | null = null
-  let bestOrder = -Infinity
+  let bestLeaf: EntityId | null = null
+  let bestLeafOrder = -Infinity
+  let bestGroup: EntityId | null = null
+  let bestGroupOrder = -Infinity
 
   for (const id of ids) {
     const e = ctx.doc.getEntity(id)
-    if (!e || e.style.visible === false || e.style.locked || e.type === 'group') continue
-    const m = resolveWorldMatrix(e, (eid) => ctx.doc.getEntity(eid))
-    const box = entityPickBounds(e, m)
-    if (!isValidAABB(box)) continue
+    if (!e || e.style.visible === false || e.style.locked) continue
+
+    let box: AABB
+    if (e.type === 'group') {
+      // Document caches world AABB of all descendants.
+      const gb = ctx.doc.getBounds(id)
+      if (!gb || !isValidAABB(gb)) continue
+      box = gb
+    } else {
+      const m = resolveWorldMatrix(e, (eid) => ctx.doc.getEntity(eid))
+      box = entityPickBounds(e, m)
+      if (!isValidAABB(box)) continue
+    }
+
     // Inflate so zero-thickness strokes remain hittable near the line.
     if (!pointInAABB(world, inflateAABB(box, pad))) continue
     const order = ctx.scene.getPickId(id) ?? 0
-    if (order >= bestOrder) {
-      bestOrder = order
-      best = id
+    if (e.type === 'group') {
+      if (order >= bestGroupOrder) {
+        bestGroupOrder = order
+        bestGroup = id
+      }
+    } else if (order >= bestLeafOrder) {
+      bestLeafOrder = order
+      bestLeaf = id
     }
   }
-  return best
+
+  return bestLeaf ?? bestGroup
 }
