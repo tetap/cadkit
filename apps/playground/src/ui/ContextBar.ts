@@ -15,20 +15,6 @@ const BOOL_OPS: Array<{ op: BooleanOp; label: MessageKey; tip: MessageKey }> = [
   { op: 'exclude', label: 'booleanExclude', tip: 'booleanExclude' },
 ]
 
-function applyHotStyle(editor: Editor, store: AppStore, patch: Record<string, unknown>): void {
-  const ids = store.get().selectionIds
-  for (const id of ids) {
-    if (patch.stroke !== undefined || patch.fill !== undefined || patch.opacity !== undefined) {
-      editor.applyStyle(id, {
-        stroke: patch.stroke as string | undefined,
-        fill: patch.fill as string | undefined,
-        opacity: patch.opacity as number | undefined,
-      })
-    }
-  }
-  refreshHotFromSelection(editor, store)
-}
-
 function fmt(n: number): string {
   if (!Number.isFinite(n)) return '0'
   const r = Math.round(n * 100) / 100
@@ -110,6 +96,8 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
   let offsetOpen = false
   let disposeCurve: (() => void) | null = null
   let curveOpen = false
+  let boolMenuOpen = false
+  let onDocPointerDown: ((ev: PointerEvent) => void) | null = null
 
   const closeOffset = () => {
     disposeOffset?.()
@@ -120,6 +108,18 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     disposeCurve?.()
     disposeCurve = null
     curveOpen = false
+  }
+  const closeBoolMenu = () => {
+    boolMenuOpen = false
+    const menu = el.querySelector('#ctx-bool-menu')
+    const btn = el.querySelector('#ctx-bool')
+    if (menu) menu.classList.add('hidden')
+    btn?.setAttribute('aria-expanded', 'false')
+    if (onDocPointerDown) {
+      document.removeEventListener('pointerdown', onDocPointerDown, true)
+      onDocPointerDown = null
+    }
+    editor.clearPreview()
   }
 
   const render = () => {
@@ -137,11 +137,13 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     if (disabled) {
       closeOffset()
       closeCurve()
+      closeBoolMenu()
       el.innerHTML = ''
       el.hidden = true
       return
     }
     el.hidden = false
+    boolMenuOpen = false
 
     el.innerHTML = `
       <div class="pointer-events-auto relative flex max-w-full items-center gap-2 overflow-x-auto rounded-2xl border border-neutral-200/90 bg-white/95 px-3 py-1.5 shadow-[0_8px_28px_rgba(15,23,42,0.12)] backdrop-blur">
@@ -161,13 +163,10 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
               </label>`
             : ''
         }
-        <span class="mx-0.5 h-6 w-px shrink-0 bg-line" aria-hidden="true"></span>
-        <label class="${fieldLabel}">${t('opacity')}
-          <input type="number" id="ctx-opacity" class="${fieldControl} w-16" min="0" max="1" step="0.05" value="${hot.opacity}" />
-        </label>
         ${
           showText
-            ? `<label class="${fieldLabel}">${t('fontSize')}
+            ? `<span class="mx-0.5 h-6 w-px shrink-0 bg-line" aria-hidden="true"></span>
+              <label class="${fieldLabel}">${t('fontSize')}
                 <input type="number" id="ctx-fs" class="${fieldControl} w-16" min="1" step="1" value="${hot.fontSize}" />
               </label>
               <button type="button" id="ctx-curve" class="${btnGhost} gap-1.5 ${hot.arcText ? '!border-brand-dark !bg-brand/15 !text-brand-dark' : ''}" title="${t('curveText')}">
@@ -189,14 +188,24 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
         </button>
         ${
           canBoolean
-            ? `<span class="mx-0.5 h-6 w-px shrink-0 bg-line" aria-hidden="true"></span>
-              <span class="shrink-0 text-[11px] text-muted">${t('boolean')}</span>
-              ${BOOL_OPS.map(
-                (b) => `
-                <button type="button" data-bool="${b.op}" class="${btnGhost} !px-2" title="${t(b.tip)}">
-                  ${t(b.label)}
-                </button>`,
-              ).join('')}`
+            ? `<div class="relative shrink-0">
+                <button type="button" id="ctx-bool" class="${btnGhost} gap-1" aria-haspopup="menu" aria-expanded="false" title="${t('boolean')}">
+                  ${t('boolean')}
+                  <svg viewBox="0 0 12 12" class="h-3 w-3 opacity-70" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path d="M3 4.5 6 7.5 9 4.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <div id="ctx-bool-menu" role="menu" class="absolute left-0 top-[calc(100%+6px)] z-50 hidden min-w-[9.5rem] overflow-hidden rounded-lg border border-line bg-panel py-1 shadow-lg">
+                  ${BOOL_OPS.map(
+                    (b) => `
+                    <button type="button" role="menuitem" data-bool="${b.op}"
+                      class="flex w-full items-center px-3 py-1.5 text-left text-xs text-ink hover:bg-soft"
+                      title="${t(b.tip)}">
+                      ${t(b.label)}
+                    </button>`,
+                  ).join('')}
+                </div>
+              </div>`
             : ''
         }
         ${
@@ -224,10 +233,6 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     for (const key of ['#ctx-x', '#ctx-y', '#ctx-w', '#ctx-h']) {
       el.querySelector(key)?.addEventListener('change', () => applyGeometry(editor, store, el))
     }
-    el.querySelector('#ctx-opacity')?.addEventListener('change', (ev) => {
-      const v = Number((ev.target as HTMLInputElement).value)
-      if (Number.isFinite(v)) applyHotStyle(editor, store, { opacity: v })
-    })
     el.querySelector('#ctx-fs')?.addEventListener('change', (ev) => {
       const v = Number((ev.target as HTMLInputElement).value)
       const id = store.get().selectionIds[0]
@@ -239,6 +244,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
       const id = store.get().selectionIds[0]
       if (!id || store.get().hot.entityType !== 'text') return
       closeOffset()
+      closeBoolMenu()
       if (curveOpen) {
         closeCurve()
         return
@@ -258,6 +264,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
         return
       }
       closeCurve()
+      closeBoolMenu()
       if (offsetOpen) {
         closeOffset()
         return
@@ -271,6 +278,27 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
         refreshHotFromSelection(editor, store)
       })
     })
+    el.querySelector('#ctx-bool')?.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      const menu = el.querySelector('#ctx-bool-menu')
+      const btn = el.querySelector('#ctx-bool')
+      if (!menu || !btn) return
+      if (boolMenuOpen) {
+        closeBoolMenu()
+        return
+      }
+      closeOffset()
+      closeCurve()
+      boolMenuOpen = true
+      menu.classList.remove('hidden')
+      btn.setAttribute('aria-expanded', 'true')
+      onDocPointerDown = (e) => {
+        const wrap = el.querySelector('#ctx-bool')?.parentElement
+        if (wrap && e.target instanceof Node && wrap.contains(e.target)) return
+        closeBoolMenu()
+      }
+      document.addEventListener('pointerdown', onDocPointerDown, true)
+    })
     el.querySelectorAll<HTMLButtonElement>('[data-bool]').forEach((btn) => {
       const op = btn.dataset.bool as BooleanOp
       btn.addEventListener('mouseenter', () => {
@@ -281,6 +309,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
       })
       btn.addEventListener('click', () => {
         const ids = editor.booleanSelection(op)
+        closeBoolMenu()
         if (!ids.length) {
           store.set({ status: t('booleanNeedSelection') })
           return
@@ -305,6 +334,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
   return () => {
     closeOffset()
     closeCurve()
+    closeBoolMenu()
     unsub()
   }
 }

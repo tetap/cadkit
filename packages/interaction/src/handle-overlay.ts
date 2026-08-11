@@ -12,6 +12,7 @@ export class HandleOverlay {
   private readonly handlesLayer: HTMLDivElement
   private readonly marqueeEl: HTMLDivElement
   private readonly guidesLayer: HTMLDivElement
+  private readonly arcGuideEl: HTMLDivElement
   private readonly handlePool: HTMLDivElement[] = []
   private readonly guidePool: HTMLDivElement[] = []
   private readonly labelPool: HTMLDivElement[] = []
@@ -88,10 +89,23 @@ export class HandleOverlay {
       pointerEvents: 'none',
     } as Partial<CSSStyleDeclaration>)
 
+    this.arcGuideEl = document.createElement('div')
+    this.arcGuideEl.className = 'cadkit-arc-guide'
+    Object.assign(this.arcGuideEl.style, {
+      position: 'absolute',
+      display: 'none',
+      boxSizing: 'border-box',
+      border: '1.5px solid rgba(37, 99, 235, 0.28)',
+      borderRadius: '50%',
+      background: 'transparent',
+      pointerEvents: 'none',
+    } as Partial<CSSStyleDeclaration>)
+
     this.root.append(
       this.hoverEl,
       this.marqueeEl,
       this.guidesLayer,
+      this.arcGuideEl,
       this.frameEl,
       this.rotateStemEl,
       this.handlesLayer,
@@ -108,29 +122,100 @@ export class HandleOverlay {
     frameRotation = 0,
   ): void {
     this.updateSelectionFrame(selectionFrame, handles, camera, canvasOffset, frameRotation)
+    this.updateArcGuide(handles, camera, canvasOffset)
     let i = 0
     for (const h of handles) {
       const el = this.acquireHandle(i++)
       const s = camera.worldToScreen(h.world)
       const isRotate = h.kind === 'rotate'
       const isScale = h.kind === 'scale'
-      const size = isRotate ? 9 : isScale ? 8 : h.kind === 'radius' ? 8 : 7
-      el.style.display = 'block'
+      const appearance = h.appearance ?? 'default'
+      const size =
+        appearance === 'arc-radius' || appearance === 'arc-angle'
+          ? 18
+          : appearance === 'arc-center'
+            ? 14
+            : isRotate
+              ? 9
+              : isScale
+                ? 8
+                : h.kind === 'radius'
+                  ? 8
+                  : 7
+      el.style.display = 'grid'
+      el.style.placeItems = 'center'
       el.style.left = `${canvasOffset.left + s.x - size / 2}px`
       el.style.top = `${canvasOffset.top + s.y - size / 2}px`
       el.style.width = `${size}px`
       el.style.height = `${size}px`
       el.style.boxSizing = 'border-box'
-      el.style.border = '1.5px solid #2563eb'
-      el.style.background = isRotate ? '#2563eb' : '#fff'
-      el.style.borderRadius = isRotate || h.kind === 'center' ? '50%' : '1px'
       el.style.pointerEvents = 'none'
       el.style.position = 'absolute'
+      el.style.boxShadow = 'none'
+      el.style.fontSize = '10px'
+      el.style.lineHeight = '1'
+      el.style.color = '#2563eb'
+      el.style.fontWeight = '500'
+      if (appearance === 'arc-radius') {
+        el.style.border = '1.5px solid #2563eb'
+        el.style.background = '#fff'
+        el.style.borderRadius = '50%'
+        el.textContent = '⌒'
+        el.style.fontSize = '12px'
+      } else if (appearance === 'arc-angle') {
+        el.style.border = '1.5px solid #2563eb'
+        el.style.background = '#fff'
+        el.style.borderRadius = '50%'
+        el.textContent = '↻'
+        el.style.fontSize = '13px'
+      } else if (appearance === 'arc-center') {
+        el.style.border = '1.5px solid #2563eb'
+        el.style.background = '#fff'
+        el.style.borderRadius = '50%'
+        el.textContent = '＋'
+        el.style.fontSize = '12px'
+        el.style.color = '#2563eb'
+      } else {
+        el.textContent = ''
+        el.style.border = '1.5px solid #2563eb'
+        const selected = !!h.selected
+        el.style.background = isRotate || selected ? '#2563eb' : '#fff'
+        el.style.borderRadius = isRotate || h.kind === 'center' || selected ? '50%' : '1px'
+        if (selected) {
+          el.style.boxShadow = '0 0 0 2px rgba(37, 99, 235, 0.25)'
+        }
+      }
     }
     for (let j = i; j < this.activeHandles; j++) {
       this.handlePool[j]!.style.display = 'none'
     }
     this.activeHandles = Math.max(this.activeHandles, i)
+  }
+
+  private updateArcGuide(
+    handles: ControlHandle[],
+    camera: Camera2D,
+    canvasOffset: { left: number; top: number },
+  ): void {
+    const guide = handles.find((h) => h.arcGuide)?.arcGuide
+    if (!guide) {
+      this.arcGuideEl.style.display = 'none'
+      return
+    }
+    const c = camera.worldToScreen(guide.center)
+    const r = camera.worldToScreen(guide.rim)
+    const screenR = Math.hypot(r.x - c.x, r.y - c.y)
+    if (!(screenR > 2)) {
+      this.arcGuideEl.style.display = 'none'
+      return
+    }
+    Object.assign(this.arcGuideEl.style, {
+      display: 'block',
+      left: `${canvasOffset.left + c.x - screenR}px`,
+      top: `${canvasOffset.top + c.y - screenR}px`,
+      width: `${screenR * 2}px`,
+      height: `${screenR * 2}px`,
+    } as Partial<CSSStyleDeclaration>)
   }
 
   private acquireHandle(index: number): HTMLDivElement {
@@ -337,6 +422,7 @@ export class HandleOverlay {
     this.frameEl.style.display = 'none'
     this.frameEl.style.transform = 'none'
     this.rotateStemEl.style.display = 'none'
+    this.arcGuideEl.style.display = 'none'
   }
 
   dispose(): void {

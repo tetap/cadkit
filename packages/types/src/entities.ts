@@ -49,6 +49,11 @@ export interface PolylineEntity extends EntityBase {
   type: 'polyline'
   points: Vec2[]
   closed: boolean
+  /**
+   * Inner hole rings for a compound closed path (opposite winding to `points`).
+   * Present after offset / boolean when outer + holes stay as one entity.
+   */
+  holes?: Vec2[][]
 }
 
 export interface ArcEntity extends EntityBase {

@@ -1,6 +1,79 @@
-import { IDENTITY_TRANSFORM, type Entity } from '@cadkit/types'
+import { IDENTITY_TRANSFORM, type Entity, type TextEntity } from '@cadkit/types'
 import { multiplyTransform } from './world-matrix.js'
-import { multiply, transformPoint, type Matrix3 } from './matrix.js'
+import { decomposeTextLinear, multiply, transformPoint, type Matrix3 } from './matrix.js'
+
+/**
+ * Bake an affine map into text fields so the selection AABB tracks the drag.
+ *
+ * Axis-aligned positive scales map height → `fontSize` and width → `widthFactor`
+ * (compensating for fontSize changing advance). Geometric-mean baking made
+ * corner/edge handles slip off the pointer for non-uniform scales.
+ */
+export function bakeTextAffine(
+  entity: TextEntity,
+  m: Matrix3,
+): Pick<TextEntity, 'position' | 'fontSize' | 'widthFactor' | 'rotation' | 'path'> {
+  const position = transformPoint(m, entity.position)
+  const a = m[0]
+  const b = m[1]
+  const c = m[2]
+  const d = m[3]
+  const axisAligned = Math.abs(b) < 1e-8 && Math.abs(c) < 1e-8
+
+  // Upright / arc text + axis-aligned positive scale (selection handles):
+  // independent sx/sy so edge/corner handles track the pointer.
+  if (axisAligned && a > 0 && d > 0 && Math.abs(entity.rotation ?? 0) < 1e-8) {
+    const sx = a
+    const sy = Math.max(d, 1e-8)
+    if (entity.path?.kind === 'arc') {
+      return {
+        position,
+        fontSize: Math.max(1e-3, entity.fontSize * sy),
+        // advance ∝ fontSize, so divide sx by sy to keep arc length *= sx.
+        widthFactor: (entity.widthFactor ?? 1) * (sx / sy),
+        rotation: 0,
+        path: {
+          ...entity.path,
+          // Layout circle follows horizontal scale of the selection frame.
+          radius: Math.max(1e-3, entity.path.radius * sx),
+        },
+      }
+    }
+    return {
+      position,
+      fontSize: Math.max(1e-3, entity.fontSize * sy),
+      // advance ∝ fontSize, so divide sx by sy to keep width *= sx.
+      widthFactor: (entity.widthFactor ?? 1) * (sx / sy),
+      rotation: 0,
+      path: entity.path,
+    }
+  }
+
+  if (entity.path?.kind === 'arc') {
+    const { scale: s, rotation: angle, widthSign } = decomposeTextLinear(m)
+    return {
+      position,
+      fontSize: Math.max(1e-3, entity.fontSize * s),
+      widthFactor: Math.abs(entity.widthFactor ?? 1),
+      rotation: entity.rotation ?? 0,
+      path: {
+        ...entity.path,
+        radius: Math.max(1e-3, entity.path.radius * s),
+        startAngle: entity.path.startAngle + angle,
+        sweep: entity.path.sweep * widthSign,
+      },
+    }
+  }
+
+  const { scale: s, rotation: angle, widthSign } = decomposeTextLinear(m)
+  return {
+    position,
+    fontSize: Math.max(1e-3, entity.fontSize * s),
+    widthFactor: (entity.widthFactor ?? 1) * widthSign,
+    rotation: (entity.rotation ?? 0) + angle,
+    path: entity.path,
+  }
+}
 
 /**
  * Apply an affine map expressed in the entity's parent/local space.
@@ -22,6 +95,14 @@ export function applyAffineToEntity(entity: Entity, m: Matrix3): Entity {
       next = { ...entity, start: tp(entity.start), end: tp(entity.end) }
       break
     case 'polyline':
+      next = {
+        ...entity,
+        points: entity.points.map(tp),
+        ...(entity.holes?.length
+          ? { holes: entity.holes.map((h) => h.map(tp)) }
+          : {}),
+      }
+      break
     case 'bezier':
       next = { ...entity, points: entity.points.map(tp) }
       break
@@ -71,30 +152,7 @@ export function applyAffineToEntity(entity: Entity, m: Matrix3): Entity {
       break
     }
     case 'text': {
-      const sx = Math.hypot(m[0], m[1])
-      const sy = Math.hypot(m[2], m[3])
-      const s =
-        sx > 1e-8 && sy > 1e-8 ? Math.sqrt(sx * sy) : Math.max(sx, sy, 1e-8)
-      const angle = Math.atan2(m[1], m[0])
-      if (entity.path?.kind === 'arc') {
-        next = {
-          ...entity,
-          position: tp(entity.position),
-          fontSize: Math.max(1e-3, entity.fontSize * s),
-          path: {
-            ...entity.path,
-            radius: Math.max(1e-3, entity.path.radius * s),
-            startAngle: entity.path.startAngle + angle,
-          },
-        }
-      } else {
-        next = {
-          ...entity,
-          position: tp(entity.position),
-          fontSize: Math.max(1e-3, entity.fontSize * s),
-          rotation: (entity.rotation ?? 0) + angle,
-        }
-      }
+      next = { ...entity, ...bakeTextAffine(entity, m) }
       break
     }
     case 'nurbs':

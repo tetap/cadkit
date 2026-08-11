@@ -1,4 +1,9 @@
-import { layoutArcText, measureTextAdvance, type Camera2D } from '@cadkit/geometry'
+import {
+  arcTextLocalBounds,
+  layoutArcText,
+  measureTextAdvance,
+  type Camera2D,
+} from '@cadkit/geometry'
 import type { Entity, EntityId, ScreenPoint, TextArcPath, TextEntity } from '@cadkit/types'
 
 export interface TextDraftState {
@@ -136,6 +141,9 @@ export class TextOverlay {
   /** Hit-test draft label (or a generous text pad) in overlay/canvas screen space. */
   hitTestDraft(screen: ScreenPoint, camera: Camera2D, pad = 8): boolean {
     if (!this.draft) return false
+    if (this.draft.path?.kind === 'arc') {
+      return this.hitTestArcDraft(screen, camera, pad)
+    }
     if (this.draftEl && this.draftEl.style.display !== 'none') {
       const rootRect = this.root.getBoundingClientRect()
       const r = this.draftEl.getBoundingClientRect()
@@ -679,11 +687,80 @@ export class TextOverlay {
     }
   }
 
-  private getArcCaretScreen(
+  /**
+   * Arc draft hit-test. Parent draftEl is 0×0 (glyphs positioned via transform),
+   * so the straight-text AABB around the circle center must not be used.
+   */
+  private hitTestArcDraft(screen: ScreenPoint, camera: Camera2D, pad: number): boolean {
+    if (this.draftEl && this.draftEl.style.display !== 'none') {
+      const rootRect = this.root.getBoundingClientRect()
+      const x = rootRect.left + screen.x
+      const y = rootRect.top + screen.y
+      const glyphs = this.draftEl.querySelectorAll('[data-cadkit-glyph]')
+      let minL = Infinity
+      let minT = Infinity
+      let maxR = -Infinity
+      let maxB = -Infinity
+      let any = false
+      for (const node of glyphs) {
+        const r = (node as HTMLElement).getBoundingClientRect()
+        if (r.width <= 0 && r.height <= 0) continue
+        any = true
+        minL = Math.min(minL, r.left)
+        minT = Math.min(minT, r.top)
+        maxR = Math.max(maxR, r.right)
+        maxB = Math.max(maxB, r.bottom)
+        if (
+          x >= r.left - pad &&
+          x <= r.right + pad &&
+          y >= r.top - pad &&
+          y <= r.bottom + pad
+        ) {
+          return true
+        }
+      }
+      // Gaps between glyphs still count (union AABB of laid-out spans).
+      if (
+        any &&
+        x >= minL - pad &&
+        x <= maxR + pad &&
+        y >= minT - pad &&
+        y <= maxB + pad
+      ) {
+        return true
+      }
+    }
+
+    const draft = this.draft!
+    const box = arcTextLocalBounds(
+      draft.content || ' ',
+      draft.fontSize,
+      draft.world,
+      draft.path!,
+      draft.widthFactor ?? 1,
+      draft.fontFamily,
+    )
+    const corners = [
+      { x: box.minX, y: box.minY },
+      { x: box.maxX, y: box.minY },
+      { x: box.maxX, y: box.maxY },
+      { x: box.minX, y: box.maxY },
+    ].map((p) => camera.worldToScreen({ x: p.x, y: p.y, __space: 'world' }))
+    const minX = Math.min(...corners.map((c) => c.x)) - pad
+    const maxX = Math.max(...corners.map((c) => c.x)) + pad
+    const minY = Math.min(...corners.map((c) => c.y)) - pad
+    const maxY = Math.max(...corners.map((c) => c.y)) + pad
+    return screen.x >= minX && screen.x <= maxX && screen.y >= minY && screen.y <= maxY
+  }
+
+  /**
+   * Baseline (em-box bottom) screen position for an arc caret slot.
+   * Matches glyph CSS: pose at bottom-center, then rotate around that point.
+   */
+  private getArcCaretBaseline(
     camera: Camera2D,
     caret: number,
-    fontSizePx: number,
-  ): { x: number; y: number; fontSizePx: number; rotation: number } {
+  ): { x: number; y: number; rotation: number } | null {
     const draft = this.draft!
     const poses = layoutArcText(
       draft.content,
@@ -699,7 +776,7 @@ export class TextOverlay {
         y: draft.world.y,
         __space: 'world',
       })
-      return { x: screen.x, y: screen.y - fontSizePx, fontSizePx, rotation: 0 }
+      return { x: screen.x, y: screen.y, rotation: 0 }
     }
     const idx = Math.max(0, Math.min(caret, poses.length) - 1)
     const g = poses[Math.max(0, idx)]!
@@ -708,11 +785,25 @@ export class TextOverlay {
     const wx = after.x + Math.cos(after.rotation) * along
     const wy = after.y + Math.sin(after.rotation) * along
     const screen = camera.worldToScreen({ x: wx, y: wy, __space: 'world' })
+    return { x: screen.x, y: screen.y, rotation: after.rotation }
+  }
+
+  private getArcCaretScreen(
+    camera: Camera2D,
+    caret: number,
+    fontSizePx: number,
+  ): { x: number; y: number; fontSizePx: number; rotation: number } {
+    const base = this.getArcCaretBaseline(camera, caret)
+    if (!base) {
+      return { x: 0, y: 0, fontSizePx, rotation: 0 }
+    }
+    // Caret tip = em-box top. Local (0,-H) after rotate(θ) → (H·sinθ, -H·cosθ).
+    // Element draws downward from tip with the same rotation (transform-origin 0 0).
     return {
-      x: screen.x,
-      y: screen.y - fontSizePx,
+      x: base.x + fontSizePx * Math.sin(base.rotation),
+      y: base.y - fontSizePx * Math.cos(base.rotation),
       fontSizePx,
-      rotation: after.rotation,
+      rotation: base.rotation,
     }
   }
 
@@ -801,11 +892,16 @@ export class TextOverlay {
       this.draft.fontFamily,
     )
     if (poses.length === 0) return 0
+    const fontSizePx = this.draft.fontSize * camera.getState().zoom
     let best = 0
     let bestDist = Infinity
     for (let i = 0; i <= poses.length; i++) {
-      const caret = this.getArcCaretScreen(camera, i, this.draft.fontSize * camera.getState().zoom)
-      const dist = (caret.x - screen.x) ** 2 + (caret.y - screen.y) ** 2
+      const base = this.getArcCaretBaseline(camera, i)
+      if (!base) continue
+      // Compare against glyph mid-height along the local upright axis.
+      const mx = base.x + (fontSizePx / 2) * Math.sin(base.rotation)
+      const my = base.y - (fontSizePx / 2) * Math.cos(base.rotation)
+      const dist = (mx - screen.x) ** 2 + (my - screen.y) ** 2
       if (dist < bestDist) {
         bestDist = dist
         best = i

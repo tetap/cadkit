@@ -1,4 +1,4 @@
-import type { EntityId, LengthUnit } from '@cadkit/types'
+import type { EntityId, LayerId, LengthUnit } from '@cadkit/types'
 import type { ToolName } from '@cadkit/editor'
 
 export type SideTab = 'inspector' | 'effects'
@@ -46,6 +46,11 @@ export interface AppState {
   layerEpoch: number
   /** Left floating layers dock visibility. */
   layersOpen: boolean
+  /**
+   * Layer currently inspected in the right sidebar (GRBL / G-code form).
+   * Set by clicking a layer; cleared when canvas selection changes.
+   */
+  inspectedLayerId: LayerId | null
 }
 
 export type AppStore = {
@@ -89,6 +94,7 @@ export function createAppStore(initial?: Partial<AppState>): AppStore {
     uiEpoch: 0,
     layerEpoch: 0,
     layersOpen: false,
+    inspectedLayerId: null,
   }
   if (initial) {
     state = {

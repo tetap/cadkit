@@ -9,6 +9,7 @@ import {
 } from '@cadkit/types'
 import {
   aggregateBounds,
+  bakeTextAffine,
   entityWorldBounds,
   invert,
   multiply,
@@ -192,6 +193,12 @@ export function transformEntityPatch(entity: Entity, m: Matrix3): Partial<Entity
     case 'line':
       return { start: tp(entity.start), end: tp(entity.end) } as Partial<Entity>
     case 'polyline':
+      return {
+        points: entity.points.map(tp),
+        ...(entity.holes?.length
+          ? { holes: entity.holes.map((h) => h.map(tp)) }
+          : {}),
+      } as Partial<Entity>
     case 'bezier':
       return { points: entity.points.map(tp) } as Partial<Entity>
     case 'circle': {
@@ -234,27 +241,8 @@ export function transformEntityPatch(entity: Entity, m: Matrix3): Partial<Entity
       } as Partial<Entity>
     }
     case 'text': {
-      // Bake scale into fontSize / arc radius; rotation into entity.rotation or arc startAngle.
-      const sx = Math.hypot(m[0], m[1])
-      const sy = Math.hypot(m[2], m[3])
-      const s =
-        sx > 1e-8 && sy > 1e-8 ? Math.sqrt(sx * sy) : Math.max(sx, sy, 1e-8)
-      const angle = Math.atan2(m[1], m[0])
-      const patch: Partial<Entity> = {
-        position: tp(entity.position),
-        fontSize: Math.max(1e-3, entity.fontSize * s),
-        rotation: (entity.rotation ?? 0) + angle,
-      }
-      if (entity.path?.kind === 'arc') {
-        patch.path = {
-          ...entity.path,
-          radius: Math.max(1e-3, entity.path.radius * s),
-          startAngle: entity.path.startAngle + angle,
-        }
-        // Arc layout already encodes orientation via startAngle.
-        patch.rotation = entity.rotation ?? 0
-      }
-      return patch
+      // Bake so AABB width/height track sx/sy (handles stay under the pointer).
+      return bakeTextAffine(entity, m) as Partial<Entity>
     }
     case 'nurbs':
       return { controlPoints: entity.controlPoints.map(tp) } as Partial<Entity>

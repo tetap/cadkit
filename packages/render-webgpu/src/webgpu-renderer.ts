@@ -191,13 +191,17 @@ export class WebGPURenderer implements RendererBackend {
 
   resize(width: number, height: number, dpr: number): void {
     if (!this.canvas || !this.context || !this.device) return
+    // Only resize the drawing buffer. CSS box is owned by Editor.layoutChrome
+    // (absolute + gutter); writing style.width/height here collapses the layout.
+    const nextW = Math.max(1, Math.floor(width * dpr))
+    const nextH = Math.max(1, Math.floor(height * dpr))
     this.width = width
     this.height = height
     this.dpr = dpr
-    // Only resize the drawing buffer. CSS box is owned by Editor.layoutChrome
-    // (absolute + gutter); writing style.width/height here collapses the layout.
-    this.canvas.width = Math.max(1, Math.floor(width * dpr))
-    this.canvas.height = Math.max(1, Math.floor(height * dpr))
+    // Assigning canvas.width clears the buffer — skip when nothing changed.
+    if (this.canvas.width === nextW && this.canvas.height === nextH) return
+    this.canvas.width = nextW
+    this.canvas.height = nextH
     this.context.configure({
       device: this.device,
       format: this.format,

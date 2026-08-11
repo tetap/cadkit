@@ -125,6 +125,7 @@ export class Editor {
   private handleOverlay: HandleOverlay | null = null
   private capabilities: CapabilityReport | null = null
   private raf = 0
+  private resizeRaf = 0
   private disposed = false
   private readonly plugins = new PluginHost(this)
   private lastMetrics: FrameMetrics | null = null
@@ -139,6 +140,11 @@ export class Editor {
   private alignGuides: AlignGuide[] = []
   private preview: PreviewPrimitive = { kind: 'none' }
   private previewLayer: HTMLDivElement | null = null
+  /**
+   * While set, offset preview is rebuilt from the live selection whenever
+   * geometry moves (so the dashed result tracks drag / transform).
+   */
+  private liveOffsetOptions: OffsetOptions | null = null
   private textOverlay: TextOverlay | null = null
   private ime: ImeTextEditor | null = null
   private placeImageHandler: ((world: { x: number; y: number }) => void) | null = null
@@ -185,22 +191,21 @@ export class Editor {
         for (const id of ids) this.selection.remove(id)
         this.events.emit('selection:change', { ids: this.selection.toArray() })
       },
-      onEntityCreated: () => this.requestRender(),
+      onEntityCreated: () => {
+        this.requestRender()
+        // Drawing tools are one-shot: return to Select (V) after placing.
+        if (this.tools.getActive() !== 'select') {
+          this.setTool('select')
+        }
+      },
       onSelectionEdited: () => {
         this.events.emit('selection:change', { ids: this.selection.toArray() })
         this.refreshHandles()
+        this.rebuildLiveOffsetPreview()
         this.requestRender()
       },
       onCameraChanged: () => {
-        const s = this.camera.getState()
-        this.events.emit('camera:change', {
-          zoom: s.zoom,
-          center: { x: s.x, y: s.y, __space: 'world' },
-        })
-        this.refreshHandles()
-        this.refreshPreview()
-        this.refreshTextOverlay()
-        this.requestRender()
+        this.notifyCameraChanged()
       },
       onToolChanged: (tool) => {
         this.events.emit('tool:change', { tool })
@@ -211,6 +216,8 @@ export class Editor {
         this.refreshHandles()
       },
       onPreview: (preview) => {
+        // Drawing-tool rubber bands replace any live offset preview session.
+        this.liveOffsetOptions = null
         this.preview = preview
         this.refreshPreview()
       },
@@ -462,7 +469,7 @@ export class Editor {
 
   updateLayer(
     id: LayerId,
-    patch: Partial<Pick<Layer, 'name' | 'visible' | 'locked' | 'color'>>,
+    patch: Partial<Pick<Layer, 'name' | 'visible' | 'locked' | 'color' | 'gcode'>>,
   ): Layer | null {
     const prev = this.document.getLayer(id)
     const layer = this.document.updateLayer(id, patch)
@@ -470,9 +477,17 @@ export class Editor {
     if (patch.color && patch.color !== prev?.color) {
       this.recolorLayerEntities(id, patch.color)
     }
-    this.scene.notifyLayersChanged()
-    this.refreshTextOverlay()
-    this.requestRender()
+    // G-code params are export-only; skip scene rebuild when nothing visual changed.
+    const visualChange =
+      patch.visible !== undefined ||
+      patch.color !== undefined ||
+      patch.name !== undefined ||
+      patch.locked !== undefined
+    if (visualChange) {
+      this.scene.notifyLayersChanged()
+      this.refreshTextOverlay()
+      this.requestRender()
+    }
     return layer
   }
 
@@ -484,12 +499,23 @@ export class Editor {
     return true
   }
 
+  /** Reorder layers (panel top = front). Returns the applied order. */
+  reorderLayers(orderedIds: readonly LayerId[]): LayerId[] {
+    const next = this.document.reorderLayers(orderedIds)
+    this.scene.notifyLayersChanged()
+    this.requestRender()
+    return next
+  }
+
   /** Move current selection onto a layer and tint with that layer's color. */
   moveSelectionToLayer(layerId: LayerId): void {
+    this.moveEntitiesToLayer(this.selection.toArray(), layerId)
+  }
+
+  /** Move entities onto a layer and tint with that layer's color. */
+  moveEntitiesToLayer(ids: readonly EntityId[], layerId: LayerId): void {
     const layer = this.document.getLayer(layerId)
-    if (!layer) return
-    const ids = this.selection.toArray()
-    if (!ids.length) return
+    if (!layer || !ids.length) return
     const color = layer.color ?? '#32cd79'
     for (const id of ids) {
       const e = this.document.getEntity(id)
@@ -514,7 +540,7 @@ export class Editor {
         'layer-move',
       )
     }
-    this.events.emit('selection:change', { ids })
+    this.events.emit('selection:change', { ids: this.selection.toArray() })
     this.requestRender()
   }
 
@@ -647,15 +673,7 @@ export class Editor {
           }
         : this.document.getDocumentBounds()
     this.camera.fitBounds(bounds)
-    this.events.emit('camera:change', {
-      zoom: this.camera.getState().zoom,
-      center: {
-        x: this.camera.getState().x,
-        y: this.camera.getState().y,
-        __space: 'world',
-      },
-    })
-    this.requestRender()
+    this.notifyCameraChanged()
   }
 
   undo(): void {
@@ -702,12 +720,7 @@ export class Editor {
       screen ??
       screenPoint(this.camera.getState().viewportWidth / 2, this.camera.getState().viewportHeight / 2)
     this.camera.zoomAt(s, factor)
-    this.events.emit('camera:change', {
-      zoom: this.camera.getState().zoom,
-      center: { x: this.camera.getState().x, y: this.camera.getState().y, __space: 'world' },
-    })
-    this.refreshHandles()
-    this.requestRender()
+    this.notifyCameraChanged()
   }
 
   /** Show a transient geometry preview (tools / offset dialog). */
@@ -717,6 +730,7 @@ export class Editor {
   }
 
   clearPreview(): void {
+    this.liveOffsetOptions = null
     this.preview = { kind: 'none' }
     this.refreshPreview()
   }
@@ -744,6 +758,7 @@ export class Editor {
       version: 1,
       points: c.points,
       closed: c.closed,
+      ...(c.holes?.length ? { holes: c.holes } : {}),
     }))
     const change = this.history.execute(
       new BatchCommand(created.map((entity) => new AddEntityCommand(entity))),
@@ -760,9 +775,21 @@ export class Editor {
 
   /** Preview offset contours for the current selection without committing. */
   previewOffsetSelection(options: OffsetOptions): number {
+    this.liveOffsetOptions = { ...options }
+    return this.rebuildLiveOffsetPreview()
+  }
+
+  /**
+   * Recompute offset preview from the current selection + {@link liveOffsetOptions}.
+   * Called while dragging/transforming so the preview tracks the sources.
+   */
+  private rebuildLiveOffsetPreview(): number {
+    const options = this.liveOffsetOptions
+    if (!options) return 0
     const ids = this.selection.toArray()
     if (!ids.length) {
-      this.clearPreview()
+      this.preview = { kind: 'none' }
+      this.refreshPreview()
       return 0
     }
     const lookup = (id: EntityId) => this.document.getEntity(id)
@@ -771,16 +798,26 @@ export class Editor {
       .filter((e): e is Entity => !!e && e.type !== 'group')
     const contours = offsetEntities(entities, options, lookup)
     if (!contours.length) {
-      this.clearPreview()
+      this.preview = { kind: 'none' }
+      this.refreshPreview()
       return 0
     }
-    this.setPreview({
-      kind: 'paths',
-      paths: contours.map((c) => ({
+    // Flatten compound contours (outer + holes) into preview path rings.
+    const paths: Array<{ points: ReturnType<typeof worldPoint>[]; closed?: boolean }> = []
+    for (const c of contours) {
+      paths.push({
         points: c.points.map((p) => worldPoint(p.x, p.y)),
         closed: c.closed,
-      })),
-    })
+      })
+      for (const hole of c.holes ?? []) {
+        paths.push({
+          points: hole.map((p) => worldPoint(p.x, p.y)),
+          closed: true,
+        })
+      }
+    }
+    this.preview = { kind: 'paths', paths }
+    this.refreshPreview()
     return contours.length
   }
 
@@ -820,6 +857,7 @@ export class Editor {
       version: 1,
       points: c.points,
       closed: true,
+      ...(c.holes?.length ? { holes: c.holes } : {}),
     }))
 
     const cmds = [
@@ -850,13 +888,20 @@ export class Editor {
       this.clearPreview()
       return 0
     }
-    this.setPreview({
-      kind: 'paths',
-      paths: contours.map((c) => ({
+    const paths: Array<{ points: ReturnType<typeof worldPoint>[]; closed?: boolean }> = []
+    for (const c of contours) {
+      paths.push({
         points: c.points.map((p) => worldPoint(p.x, p.y)),
         closed: true,
-      })),
-    })
+      })
+      for (const hole of c.holes ?? []) {
+        paths.push({
+          points: hole.map((p) => worldPoint(p.x, p.y)),
+          closed: true,
+        })
+      }
+    }
+    this.setPreview({ kind: 'paths', paths })
     return contours.length
   }
 
@@ -887,6 +932,7 @@ export class Editor {
     this.setLifecycle('disposing')
     this.disposed = true
     if (this.raf) cancelAnimationFrame(this.raf)
+    if (this.resizeRaf) cancelAnimationFrame(this.resizeRaf)
     this.resizeObserver?.disconnect()
     this.canvas?.removeEventListener('pointerdown', this.onPointerDown)
     this.canvas?.removeEventListener('pointermove', this.onPointerMove)
@@ -1090,7 +1136,8 @@ export class Editor {
     if (!this.host) return
     let didInitialPageFit = false
     const apply = () => {
-      if (!this.canvas || !this.host) return
+      this.resizeRaf = 0
+      if (!this.canvas || !this.host || this.disposed) return
       this.layoutChrome()
       const hostRect = this.host.getBoundingClientRect()
       // Camera / picking must match the canvas CSS box (pointer uses the same rect).
@@ -1114,10 +1161,21 @@ export class Editor {
       this.refreshHandles()
       this.refreshPreview()
       this.refreshTextOverlay()
-      this.requestRender()
+      // Paint in this same frame. Setting canvas.width clears the buffer; delaying
+      // via requestRender leaves a visible blank flash while the window resizes.
+      if (this.raf) {
+        cancelAnimationFrame(this.raf)
+        this.raf = 0
+      }
+      this.tools.tick()
+      this.renderFrame()
+    }
+    const schedule = () => {
+      if (this.disposed || this.resizeRaf) return
+      this.resizeRaf = requestAnimationFrame(apply)
     }
     apply()
-    this.resizeObserver = new ResizeObserver(apply)
+    this.resizeObserver = new ResizeObserver(schedule)
     this.resizeObserver.observe(this.host)
   }
 
@@ -1190,11 +1248,19 @@ export class Editor {
     const screen = this.toScreen(ev)
     const factor = ev.deltaY > 0 ? 0.9 : 1.1
     this.camera.zoomAt(screen, factor)
+    this.notifyCameraChanged()
+  }
+
+  /** Emit camera event and refresh overlays that bake world→screen (handles / preview / text). */
+  private notifyCameraChanged(): void {
+    const s = this.camera.getState()
     this.events.emit('camera:change', {
-      zoom: this.camera.getState().zoom,
-      center: { x: this.camera.getState().x, y: this.camera.getState().y, __space: 'world' },
+      zoom: s.zoom,
+      center: { x: s.x, y: s.y, __space: 'world' },
     })
     this.refreshHandles()
+    this.refreshPreview()
+    this.refreshTextOverlay()
     this.requestRender()
   }
 
@@ -1406,12 +1472,18 @@ export class Editor {
       mark.setAttribute('fill', '#60a5fa')
       svg.appendChild(mark)
     } else if (p.kind === 'paths') {
+      // Match WebGPU hairlines: 1 framebuffer pixel ≈ 1/dpr CSS px.
+      const dpr = Math.max(1, this.config.dpr ?? window.devicePixelRatio ?? 1)
+      const pathStroke = 1 / dpr
       for (const path of p.paths) {
         if (!path.points.length) continue
         const el = document.createElementNS('http://www.w3.org/2000/svg', 'path')
         el.setAttribute('fill', 'none')
-        el.setAttribute('stroke', '#60a5fa')
-        el.setAttribute('stroke-width', '1.5')
+        el.setAttribute('stroke', '#2563eb')
+        el.setAttribute('stroke-width', String(pathStroke))
+        el.setAttribute('stroke-linejoin', 'round')
+        el.setAttribute('stroke-linecap', 'round')
+        el.setAttribute('vector-effect', 'non-scaling-stroke')
         const d =
           path.points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${toS(pt.x, pt.y)}`).join(' ') +
           (path.closed !== false ? ' Z' : '')
@@ -1743,7 +1815,8 @@ export class Editor {
 
 /**
  * Uniformly scale an imported entity from source units into world units.
- * Scales geometry via affine map, plus strokeWidth / fontSize / arc radius.
+ * Geometry / fontSize / arc radius come from applyAffineToEntity; strokeWidth
+ * is style metadata and must be scaled separately.
  */
 function scaleImportedEntity(entity: Entity, factor: number): Entity {
   if (!(factor > 0) || Math.abs(factor - 1) < 1e-12) return entity
@@ -1753,13 +1826,6 @@ function scaleImportedEntity(entity: Entity, factor: number): Entity {
       ...next,
       style: { ...next.style, strokeWidth: next.style.strokeWidth * factor },
     }
-  }
-  if (next.type === 'text') {
-    const path =
-      next.path?.kind === 'arc'
-        ? { ...next.path, radius: next.path.radius * factor }
-        : next.path
-    next = { ...next, fontSize: next.fontSize * factor, path }
   }
   return next
 }

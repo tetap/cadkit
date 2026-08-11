@@ -76,3 +76,48 @@ export function compose(translateXY: Vec2, scaleXY: Vec2, rotation: number): Mat
 export function determinant(m: Matrix3): number {
   return m[0] * m[3] - m[1] * m[2]
 }
+
+/**
+ * Decompose the linear part of an affine matrix for baking into text entities.
+ *
+ * Reflections (det < 0) are encoded as a negative `scaleX` plus an adjusted
+ * rotation — same convention as CSS 2D matrix decomposition — so a horizontal
+ * flip becomes `widthFactor *= -1` rather than a bogus `rotation += π` that
+ * leaves glyphs upside-down relative to the selection AABB.
+ */
+export function decomposeTextLinear(m: Matrix3): {
+  /** Uniform magnitude applied to fontSize / arc radius (always > 0). */
+  scale: number
+  /** Delta rotation in radians. */
+  rotation: number
+  /** Sign for widthFactor (±1). Negative means mirror about the local Y axis. */
+  widthSign: number
+} {
+  const a = m[0]
+  const b = m[1]
+  const c = m[2]
+  const d = m[3]
+  let scaleX = Math.hypot(a, b)
+  const scaleY = Math.hypot(c, d)
+  let row0x = a
+  let row0y = b
+  // det < 0 ⇒ reflection: fold into negative scaleX and unflip the first column
+  // before taking atan2 (CSS Transforms Level 1 decomposition).
+  if (a * d - b * c < 0) {
+    scaleX = -scaleX
+    row0x = -row0x
+    row0y = -row0y
+  }
+  const absX = Math.abs(scaleX)
+  const absY = Math.abs(scaleY)
+  const scale =
+    absX > 1e-8 && absY > 1e-8 ? Math.sqrt(absX * absY) : Math.max(absX, absY, 1e-8)
+  const rotation = absX > 1e-8 || Math.abs(row0y) > 1e-8 || Math.abs(row0x) > 1e-8
+    ? Math.atan2(row0y, row0x)
+    : 0
+  return {
+    scale,
+    rotation,
+    widthSign: scaleX < 0 ? -1 : 1,
+  }
+}

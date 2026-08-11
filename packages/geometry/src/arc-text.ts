@@ -146,6 +146,129 @@ export function placeArcTextCentered(
   }
 }
 
+function arcLayoutRadius(
+  path: TextArcPath,
+  fontSize: number,
+): { radius: number; layoutR: number; dir: number; baseline: 'outer' | 'inner' } {
+  const radius = Math.max(1e-3, path.radius)
+  const baseline = path.baseline ?? 'outer'
+  const layoutR = baseline === 'inner' ? Math.max(1e-3, radius - fontSize) : radius
+  const dir = path.sweep < 0 ? -1 : 1
+  return { radius, layoutR, dir, baseline }
+}
+
+function measureArcTextWidth(entity: TextLayoutInput): number {
+  const fontSize = Math.max(1e-6, entity.fontSize)
+  const fontFamily = entity.fontFamily || 'sans-serif'
+  const wf = entity.widthFactor ?? 1
+  return Math.max(
+    fontSize * 0.5,
+    measureTextAdvance(entity.content.replace(/\r?\n/gu, ' '), fontSize, fontFamily, wf),
+  )
+}
+
+/**
+ * World-space string midpoint on the arc baseline (the "text calculation center"
+ * used as the pivot when editing radius / angles).
+ */
+export function arcTextStringMidpoint(entity: TextLayoutInput): Vec2 | null {
+  if (entity.path?.kind !== 'arc') return null
+  const fontSize = Math.max(1e-6, entity.fontSize)
+  const { layoutR, dir } = arcLayoutRadius(entity.path, fontSize)
+  const textWidth = measureArcTextWidth(entity)
+  const midAngle = entity.path.startAngle + dir * (textWidth / (2 * layoutR))
+  return {
+    x: entity.position.x + layoutR * Math.cos(midAngle),
+    y: entity.position.y + layoutR * Math.sin(midAngle),
+  }
+}
+
+/**
+ * Slide text around a fixed circle center so the string midpoint faces `midAngle`.
+ * Keeps radius / sweep / baseline and `entity.position` unchanged.
+ */
+export function slideArcTextOnCircle(
+  entity: TextLayoutInput,
+  midAngle: number,
+): ArcTextPlacement {
+  if (entity.path?.kind !== 'arc') {
+    return placeArcTextCentered(entity)
+  }
+  const fontSize = Math.max(1e-6, entity.fontSize)
+  const { radius, layoutR, dir, baseline } = arcLayoutRadius(entity.path, fontSize)
+  const textWidth = measureArcTextWidth(entity)
+  const startAngle = midAngle - dir * (textWidth / (2 * layoutR))
+  return {
+    position: { x: entity.position.x, y: entity.position.y },
+    path: {
+      kind: 'arc',
+      radius,
+      startAngle,
+      sweep: entity.path.sweep,
+      baseline,
+    },
+  }
+}
+
+/**
+ * Update arc path parameters while keeping the string-midpoint world position fixed.
+ * When `startAngle` is omitted, the midpoint polar angle is preserved and startAngle
+ * is recomputed from text width / radius (so radius edits do not make glyphs "run").
+ */
+export function updateArcTextPath(
+  entity: TextLayoutInput,
+  next: {
+    radius?: number
+    sweep?: number
+    baseline?: 'outer' | 'inner'
+    /** When set, rotate around the apex so this becomes the new startAngle. */
+    startAngle?: number
+  },
+): ArcTextPlacement {
+  if (entity.path?.kind !== 'arc') {
+    return placeArcTextCentered(entity, next)
+  }
+
+  const fontSize = Math.max(1e-6, entity.fontSize)
+  const textWidth = measureArcTextWidth(entity)
+  const old = arcLayoutRadius(entity.path, fontSize)
+  const oldMidAngle = entity.path.startAngle + old.dir * (textWidth / (2 * old.layoutR))
+  const apex = {
+    x: entity.position.x + old.layoutR * Math.cos(oldMidAngle),
+    y: entity.position.y + old.layoutR * Math.sin(oldMidAngle),
+  }
+
+  const radius = Math.max(1e-3, next.radius ?? entity.path.radius)
+  const sweep = next.sweep ?? entity.path.sweep
+  const baseline = next.baseline ?? old.baseline
+  const dir = sweep < 0 ? -1 : 1
+  const layoutR = baseline === 'inner' ? Math.max(1e-3, radius - fontSize) : radius
+
+  let startAngle: number
+  let midAngle: number
+  if (next.startAngle != null && Number.isFinite(next.startAngle)) {
+    startAngle = next.startAngle
+    midAngle = startAngle + dir * (textWidth / (2 * layoutR))
+  } else {
+    midAngle = oldMidAngle
+    startAngle = midAngle - dir * (textWidth / (2 * layoutR))
+  }
+
+  return {
+    position: {
+      x: apex.x - layoutR * Math.cos(midAngle),
+      y: apex.y - layoutR * Math.sin(midAngle),
+    },
+    path: {
+      kind: 'arc',
+      radius,
+      startAngle,
+      sweep,
+      baseline,
+    },
+  }
+}
+
 /** Flatten arc text back to straight: baseline at the arc visual center. */
 export function placeStraightTextFromArc(entity: TextLayoutInput): { position: Vec2; path: undefined } {
   const center = textVisualCenter(entity)

@@ -7,6 +7,7 @@ import { getLocale, onLocaleChange, t } from './i18n/index.js'
 import { mountAppBar } from './ui/AppBar.js'
 import { mountContextBar } from './ui/ContextBar.js'
 import { mountLayersPanel } from './ui/LayersPanel.js'
+import { mountSidePanel } from './ui/SidePanel.js'
 import { applyPersistedImportDpi, openSettingsDialog } from './ui/SettingsDialog.js'
 import { mountStatusBar } from './ui/StatusBar.js'
 import { mountToolRail } from './ui/ToolRail.js'
@@ -17,6 +18,10 @@ const canvasHost = document.querySelector<HTMLElement>('#canvas-host')!
 const appBarEl = document.querySelector<HTMLElement>('#app-bar')!
 const toolRailEl = document.querySelector<HTMLElement>('#tool-rail')!
 const layersPanelEl = document.querySelector<HTMLElement>('#layers-panel')!
+const sideTabsEl = document.querySelector<HTMLElement>('#side-tabs')!
+const inspectorPanelEl = document.querySelector<HTMLElement>('#inspector-panel')!
+const effectsPanelEl = document.querySelector<HTMLElement>('#effects-panel')!
+const layerGcodePanelEl = document.querySelector<HTMLElement>('#layer-gcode-panel')!
 const contextBarEl = document.querySelector<HTMLElement>('#context-bar')!
 const viewBarEl = document.querySelector<HTMLElement>('#view-bar')!
 const statusBarEl = document.querySelector<HTMLElement>('#status-bar')!
@@ -67,6 +72,14 @@ async function boot(): Promise<void> {
   })
   mountToolRail(toolRailEl, editor, store)
   mountLayersPanel(layersPanelEl, editor, store)
+  mountSidePanel(
+    sideTabsEl,
+    inspectorPanelEl,
+    effectsPanelEl,
+    layerGcodePanelEl,
+    editor,
+    store,
+  )
   mountContextBar(contextBarEl, editor, store)
   mountViewBar(viewBarEl, editor, store)
   mountStatusBar(statusBarEl, editor, store)

@@ -14,7 +14,16 @@ export {
   type EditorConfig,
   type LengthUnit,
 } from '@cadkit/types'
-export { CadDocument, layerFillFromStroke, type Layer } from '@cadkit/document'
+export {
+  CadDocument,
+  DEFAULT_LAYER_GCODE,
+  layerFillFromStroke,
+  resolveLayerGcode,
+  type Layer,
+  type LayerEngraveMode,
+  type LayerFillStyle,
+  type LayerGcodeParams,
+} from '@cadkit/document'
 export {
   Camera2D,
   convertLength,

@@ -202,6 +202,170 @@ describe('SelectTool drag', () => {
     expect((doc.getEntity(id) as Extract<Entity, { type: 'text' }>).content).toBe('画布内编辑')
   })
 
+  it('selects polyline vertices in edit mode and deletes them', () => {
+    const doc = new CadDocument()
+    const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)
+    const camera = new Camera2D()
+    camera.setViewport(800, 600)
+    camera.setZoom(1)
+    const selection = new SelectionSet()
+    const id = createEntityId('poly')
+    scene.applyChange(
+      doc.add({
+        id,
+        type: 'polyline',
+        layerId: doc.getDefaultLayerId(),
+        style: { stroke: '#0f0' },
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        closed: true,
+        points: [
+          { x: 100, y: 100 },
+          { x: 140, y: 100 },
+          { x: 140, y: 140 },
+          { x: 100, y: 140 },
+        ],
+      }),
+    )
+    const tools = new ToolManager({
+      doc,
+      camera,
+      scene,
+      selection,
+      snap: { enabled: false, pixelTolerance: 8, worldPerPixel: 1, gridSize: 10 },
+      ortho: false,
+      applyPatches: (patches) => {
+        for (const [eid, patch] of patches) scene.applyChange(doc.update(eid, patch))
+      },
+      removeEntities: (ids) => {
+        for (const eid of ids) doc.remove(eid)
+        selection.clear()
+      },
+    })
+
+    tools.doubleClick(screenPoint(120, 100), worldPoint(120, 100))
+    expect(tools.getSelectMode()).toBe('edit')
+
+    tools.pointerDown(screenPoint(140, 100), worldPoint(140, 100), 0)
+    tools.pointerUp(screenPoint(140, 100), worldPoint(140, 100), 0)
+    expect(tools.getSelectedVertices()).toEqual([{ holeIndex: null, pointIndex: 1 }])
+    expect(tools.getSelectionHandles().some((h) => h.selected)).toBe(true)
+
+    tools.keyDown('Delete')
+    const poly = doc.getEntity(id)
+    expect(poly?.type).toBe('polyline')
+    if (poly?.type === 'polyline') {
+      expect(poly.points).toHaveLength(3)
+      expect(poly.points.some((p) => p.x === 140 && p.y === 100)).toBe(false)
+    }
+    expect(tools.getSelectedVertices()).toEqual([])
+    expect(tools.getSelectMode()).toBe('edit')
+  })
+
+  it('does not delete the whole path on Delete without a vertex selection', () => {
+    const doc = new CadDocument()
+    const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)
+    const camera = new Camera2D()
+    camera.setViewport(800, 600)
+    camera.setZoom(1)
+    const selection = new SelectionSet()
+    const id = createEntityId('poly')
+    scene.applyChange(
+      doc.add({
+        id,
+        type: 'polyline',
+        layerId: doc.getDefaultLayerId(),
+        style: { stroke: '#0f0' },
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        closed: true,
+        points: [
+          { x: 100, y: 100 },
+          { x: 140, y: 100 },
+          { x: 140, y: 140 },
+          { x: 100, y: 140 },
+        ],
+      }),
+    )
+    const tools = new ToolManager({
+      doc,
+      camera,
+      scene,
+      selection,
+      snap: { enabled: false, pixelTolerance: 8, worldPerPixel: 1, gridSize: 10 },
+      ortho: false,
+      removeEntities: (ids) => {
+        for (const eid of ids) doc.remove(eid)
+        selection.clear()
+      },
+    })
+
+    tools.doubleClick(screenPoint(120, 100), worldPoint(120, 100))
+    expect(tools.getSelectMode()).toBe('edit')
+    tools.keyDown('Delete')
+    expect(doc.getEntity(id)).toBeTruthy()
+    expect(tools.getSelectMode()).toBe('edit')
+  })
+
+  it('shift-click toggles vertex selection without dragging', () => {
+    const doc = new CadDocument()
+    const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)
+    const camera = new Camera2D()
+    camera.setViewport(800, 600)
+    camera.setZoom(1)
+    const selection = new SelectionSet()
+    const id = createEntityId('poly')
+    scene.applyChange(
+      doc.add({
+        id,
+        type: 'polyline',
+        layerId: doc.getDefaultLayerId(),
+        style: { stroke: '#0f0' },
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        closed: true,
+        points: [
+          { x: 100, y: 100 },
+          { x: 140, y: 100 },
+          { x: 140, y: 140 },
+          { x: 100, y: 140 },
+        ],
+      }),
+    )
+    const patchesLog: Array<Map<EntityId, Partial<Entity>>> = []
+    const tools = new ToolManager({
+      doc,
+      camera,
+      scene,
+      selection,
+      snap: { enabled: false, pixelTolerance: 8, worldPerPixel: 1, gridSize: 10 },
+      ortho: false,
+      applyPatches: (patches) => {
+        patchesLog.push(patches)
+        for (const [eid, patch] of patches) scene.applyChange(doc.update(eid, patch))
+      },
+    })
+
+    tools.doubleClick(screenPoint(120, 100), worldPoint(120, 100))
+    tools.pointerDown(screenPoint(140, 100), worldPoint(140, 100), 0)
+    tools.pointerUp(screenPoint(140, 100), worldPoint(140, 100), 0)
+    expect(tools.getSelectedVertices()).toEqual([{ holeIndex: null, pointIndex: 1 }])
+
+    tools.setModifierKeys({ shiftKey: true })
+    tools.pointerDown(screenPoint(140, 100), worldPoint(140, 100), 0)
+    tools.pointerMove(screenPoint(150, 110), worldPoint(150, 110))
+    tools.pointerUp(screenPoint(150, 110), worldPoint(150, 110), 0)
+    tools.setModifierKeys({ shiftKey: false })
+
+    expect(tools.getSelectedVertices()).toEqual([])
+    expect(patchesLog.length).toBe(0)
+    const poly = doc.getEntity(id)
+    expect(poly?.type).toBe('polyline')
+    if (poly?.type === 'polyline') {
+      expect(poly.points[1]).toEqual({ x: 140, y: 100 })
+    }
+  })
+
   it('exposes marquee AABB while box-selecting empty space', () => {
     const doc = new CadDocument()
     const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)

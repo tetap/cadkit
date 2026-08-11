@@ -211,17 +211,24 @@ function buildPageGridGeometry(
     data[o++] = a
   }
 
+  // Keep stroke endpoints slightly inside the fill so the page rim is not a hard line.
+  const rimInset = Math.min(1, pageScreenW * 0.02, pageScreenH * 0.02)
+  const gridTop = pageTop + rimInset
+  const gridBottom = pageBottom - rimInset
+  const gridLeft = pageLeft + rimInset
+  const gridRight = pageRight - rimInset
+
   for (const line of innerXs) {
     const s = camera.worldToScreen({ x: line.world, y: page.minY, __space: 'world' })
     const color = line.major ? style.majorColor : style.minorColor
-    pushScreen(s.x, pageTop, s.x, pageBottom, color)
+    pushScreen(s.x, gridTop, s.x, gridBottom, color)
     if (line.major) majorCount++
     else minorCount++
   }
   for (const line of innerYs) {
     const s = camera.worldToScreen({ x: page.minX, y: line.world, __space: 'world' })
     const color = line.major ? style.majorColor : style.minorColor
-    pushScreen(pageLeft, s.y, pageRight, s.y, color)
+    pushScreen(gridLeft, s.y, gridRight, s.y, color)
     if (line.major) majorCount++
     else minorCount++
   }

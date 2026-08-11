@@ -90,6 +90,50 @@ describe('selection-transform', () => {
     expect(patch?.path).toMatchObject({ kind: 'arc', radius: 80 })
   })
 
+  it('non-uniform text scale tracks AABB so corner handles stay under the pointer', () => {
+    const text = {
+      id: createEntityId('text'),
+      type: 'text' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      content: 'Hello',
+      position: { x: 10, y: 40 },
+      fontFamily: 'sans-serif',
+      fontSize: 20,
+      align: 'left' as const,
+    }
+    const before = selectionWorldBounds([text])!
+    // Stretch 2× in X only about the left edge (west = anchor).
+    const patch = transformEntityPatch(text, scaleMatrixAbout({ x: before.minX, y: 0 }, 2, 1))
+    const after = selectionWorldBounds([{ ...text, ...patch } as typeof text])!
+    expect(after.minX).toBeCloseTo(before.minX, 3)
+    expect(after.maxX - after.minX).toBeCloseTo((before.maxX - before.minX) * 2, 2)
+    expect(after.maxY - after.minY).toBeCloseTo(before.maxY - before.minY, 2)
+  })
+
+  it('horizontal reverse-scale flips widthFactor without rotating text', () => {
+    const text = {
+      id: createEntityId('text'),
+      type: 'text' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      content: 'CAD',
+      position: { x: 50, y: 40 },
+      fontFamily: 'sans-serif',
+      fontSize: 20,
+      rotation: 0,
+    }
+    const patch = transformEntityPatch(text, scaleMatrixAbout({ x: 0, y: 40 }, -1, 1))
+    expect(patch?.position).toEqual({ x: -50, y: 40 })
+    expect(patch?.fontSize).toBeCloseTo(20)
+    expect(patch?.rotation ?? 0).toBeCloseTo(0)
+    expect(patch?.widthFactor).toBeCloseTo(-1)
+  })
+
   it('aggregates selection bounds', () => {
     const a = {
       id: createEntityId(),

@@ -53,16 +53,23 @@ export function distanceToEntity(entity: Entity, world: WorldPoint, worldMatrix?
     case 'line':
       return distancePointToSegment(world, wp(entity.start), wp(entity.end))
     case 'polyline': {
-      if (entity.points.length < 2) return Infinity
-      let best = Infinity
-      for (let i = 0; i + 1 < entity.points.length; i++) {
-        best = Math.min(best, distancePointToSegment(world, wp(entity.points[i]!), wp(entity.points[i + 1]!)))
+      const ringDist = (pts: typeof entity.points, closed: boolean): number => {
+        if (pts.length < 2) return Infinity
+        let best = Infinity
+        for (let i = 0; i + 1 < pts.length; i++) {
+          best = Math.min(best, distancePointToSegment(world, wp(pts[i]!), wp(pts[i + 1]!)))
+        }
+        if (closed && pts.length >= 2) {
+          best = Math.min(
+            best,
+            distancePointToSegment(world, wp(pts[pts.length - 1]!), wp(pts[0]!)),
+          )
+        }
+        return best
       }
-      if (entity.closed && entity.points.length >= 2) {
-        best = Math.min(
-          best,
-          distancePointToSegment(world, wp(entity.points[entity.points.length - 1]!), wp(entity.points[0]!)),
-        )
+      let best = ringDist(entity.points, entity.closed)
+      for (const hole of entity.holes ?? []) {
+        best = Math.min(best, ringDist(hole, true))
       }
       return best
     }

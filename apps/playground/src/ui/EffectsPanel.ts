@@ -17,7 +17,6 @@ const BUILTINS: BuiltinFilterName[] = [
   'saturation',
   'grayscale',
   'invert',
-  'opacity',
   'blur',
 ]
 
@@ -35,7 +34,6 @@ const SLIDER: Partial<Record<BuiltinFilterName, { min: number; max: number; step
   brightness: { min: 0, max: 2, step: 0.05 },
   contrast: { min: 0, max: 2, step: 0.05 },
   saturation: { min: 0, max: 2, step: 0.05 },
-  opacity: { min: 0, max: 1, step: 0.05 },
   blur: { min: 0, max: 16, step: 0.5 },
 }
 

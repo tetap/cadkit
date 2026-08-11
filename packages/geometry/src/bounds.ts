@@ -13,7 +13,14 @@ export function entityLocalBounds(entity: Entity): AABB {
   switch (entity.type) {
     case 'line':
       return aabbFromPoints([entity.start, entity.end])
-    case 'polyline':
+    case 'polyline': {
+      if (entity.holes?.length) {
+        const all = [...entity.points]
+        for (const h of entity.holes) all.push(...h)
+        return aabbFromPoints(all)
+      }
+      return aabbFromPoints(entity.points)
+    }
     case 'bezier':
       return aabbFromPoints(entity.points)
     case 'arc':
@@ -69,36 +76,73 @@ export function entityLocalBounds(entity: Entity): AABB {
 /**
  * Match TextOverlay: `position` is the first line's em-box bottom (CSS
  * line-height:1, transform-origin at bottom). Y grows downward.
+ * Applies the same rotate + scaleX(widthFactor) as the overlay so flipped /
+ * rotated text stays inside the selection frame.
  */
 function straightTextLocalBounds(entity: Extract<Entity, { type: 'text' }>): AABB {
   const fontSize = entity.fontSize
   const fontFamily = entity.fontFamily || 'sans-serif'
   const wf = entity.widthFactor ?? 1
+  const absWf = Math.abs(wf)
   const align = entity.align ?? 'left'
+  const rot = entity.rotation ?? 0
   const lines = entity.content.split(/\r?\n/u)
   const lineCount = Math.max(1, lines.length)
 
-  let minX = Infinity
-  let maxX = -Infinity
+  let localMinX = Infinity
+  let localMaxX = -Infinity
 
   for (let i = 0; i < lineCount; i++) {
     const line = lines[i] ?? ''
-    const advance = measureTextLine(line, fontSize, fontFamily).advance * wf
-    let lineLeft = entity.position.x
-    if (align === 'center') lineLeft = entity.position.x - advance / 2
-    else if (align === 'right') lineLeft = entity.position.x - advance
-    minX = Math.min(minX, lineLeft)
-    maxX = Math.max(maxX, lineLeft + advance)
+    const advance = measureTextLine(line, fontSize, fontFamily).advance * absWf
+    let lineLeft = 0
+    if (align === 'center') lineLeft = -advance / 2
+    else if (align === 'right') lineLeft = -advance
+    // Negative widthFactor mirrors about the local Y axis (CSS scaleX).
+    const x0 = wf < 0 ? -lineLeft - advance : lineLeft
+    const x1 = x0 + advance
+    localMinX = Math.min(localMinX, x0, x1)
+    localMaxX = Math.max(localMaxX, x0, x1)
   }
 
-  if (!Number.isFinite(minX)) {
-    minX = entity.position.x
-    maxX = entity.position.x
+  if (!Number.isFinite(localMinX)) {
+    localMinX = 0
+    localMaxX = 0
   }
 
-  const top = entity.position.y - fontSize
-  const bottom = entity.position.y + (lineCount - 1) * fontSize
-  return createAABB(minX, top, maxX, bottom)
+  const localMinY = -fontSize
+  const localMaxY = (lineCount - 1) * fontSize
+
+  if (Math.abs(rot) < 1e-12 && wf >= 0) {
+    return createAABB(
+      entity.position.x + localMinX,
+      entity.position.y + localMinY,
+      entity.position.x + localMaxX,
+      entity.position.y + localMaxY,
+    )
+  }
+
+  const cos = Math.cos(rot)
+  const sin = Math.sin(rot)
+  const corners: Vec2[] = [
+    { x: localMinX, y: localMinY },
+    { x: localMaxX, y: localMinY },
+    { x: localMaxX, y: localMaxY },
+    { x: localMinX, y: localMaxY },
+  ]
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const p of corners) {
+    const wx = entity.position.x + p.x * cos - p.y * sin
+    const wy = entity.position.y + p.x * sin + p.y * cos
+    minX = Math.min(minX, wx)
+    minY = Math.min(minY, wy)
+    maxX = Math.max(maxX, wx)
+    maxY = Math.max(maxY, wy)
+  }
+  return createAABB(minX, minY, maxX, maxY)
 }
 
 export function transformAABB(box: AABB, m: Matrix3): AABB {

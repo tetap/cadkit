@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   arcTextLocalBounds,
+  arcTextStringMidpoint,
   layoutArcText,
   placeArcTextCentered,
   textVisualCenter,
+  slideArcTextOnCircle,
+  updateArcTextPath,
 } from './arc-text.js'
 
 describe('layoutArcText', () => {
@@ -90,6 +93,60 @@ describe('layoutArcText', () => {
     // Outer baseline at angle≈0: em-box grows in +X (away from center).
     expect(box.maxX).toBeGreaterThan(pose.x + fontSize * 0.5)
     expect(box.minX).toBeLessThanOrEqual(pose.x + 1e-6)
+  })
+})
+
+describe('slideArcTextOnCircle', () => {
+  it('rotates text around a fixed center', () => {
+    const entity = {
+      content: 'HELLO',
+      position: { x: 0, y: 0 },
+      fontSize: 14,
+      fontFamily: 'sans-serif',
+      path: {
+        kind: 'arc' as const,
+        radius: 80,
+        startAngle: -Math.PI / 2,
+        sweep: Math.PI,
+      },
+    }
+    const next = slideArcTextOnCircle(entity, 0)
+    expect(next.position).toEqual(entity.position)
+    expect(next.path.radius).toBe(80)
+    const mid = arcTextStringMidpoint({ ...entity, path: next.path })!
+    expect(mid.x).toBeCloseTo(80, 3)
+    expect(mid.y).toBeCloseTo(0, 3)
+  })
+})
+
+describe('updateArcTextPath', () => {
+  it('keeps the string midpoint fixed when radius changes', () => {
+    const placed = placeArcTextCentered({
+      content: 'HELLO',
+      position: { x: 100, y: 80 },
+      fontSize: 16,
+      fontFamily: 'sans-serif',
+      align: 'left',
+    })
+    const entity = {
+      content: 'HELLO',
+      position: placed.position,
+      fontSize: 16,
+      fontFamily: 'sans-serif',
+      path: placed.path,
+    }
+    const before = arcTextStringMidpoint(entity)!
+    const next = updateArcTextPath(entity, { radius: placed.path.radius * 1.8 })
+    const after = arcTextStringMidpoint({
+      ...entity,
+      position: next.position,
+      path: next.path,
+    })!
+    expect(after.x).toBeCloseTo(before.x, 4)
+    expect(after.y).toBeCloseTo(before.y, 4)
+    expect(next.path.radius).toBeCloseTo(placed.path.radius * 1.8, 5)
+    // startAngle must reflow with textWidth / radius
+    expect(next.path.startAngle).not.toBeCloseTo(placed.path.startAngle, 3)
   })
 })
 

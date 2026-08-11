@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { IDENTITY, invert, multiply, transformPoint, rotate, translate, scale } from './matrix.js'
+import {
+  IDENTITY,
+  decomposeTextLinear,
+  invert,
+  multiply,
+  transformPoint,
+  rotate,
+  translate,
+  scale,
+} from './matrix.js'
 import { Camera2D } from './camera.js'
 import { screenPoint, worldPoint } from '@cadkit/types'
 
@@ -24,6 +33,27 @@ describe('matrix', () => {
   it('identity is neutral', () => {
     const p = transformPoint(IDENTITY, { x: 5, y: 7 })
     expect(p).toEqual({ x: 5, y: 7 })
+  })
+
+  it('decomposeTextLinear maps horizontal flip to widthSign, not π rotation', () => {
+    const d = decomposeTextLinear(scale(-2, 2))
+    expect(d.scale).toBeCloseTo(2)
+    expect(d.rotation).toBeCloseTo(0)
+    expect(d.widthSign).toBe(-1)
+  })
+
+  it('decomposeTextLinear maps vertical flip to π + widthSign', () => {
+    const d = decomposeTextLinear(scale(2, -2))
+    expect(d.scale).toBeCloseTo(2)
+    expect(Math.abs(d.rotation)).toBeCloseTo(Math.PI)
+    expect(d.widthSign).toBe(-1)
+  })
+
+  it('decomposeTextLinear maps both-axis flip to π only', () => {
+    const d = decomposeTextLinear(scale(-2, -2))
+    expect(d.scale).toBeCloseTo(2)
+    expect(Math.abs(d.rotation)).toBeCloseTo(Math.PI)
+    expect(d.widthSign).toBe(1)
   })
 })
 

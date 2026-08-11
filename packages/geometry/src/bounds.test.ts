@@ -116,6 +116,33 @@ describe('bounds', () => {
     expect(text.maxY).toBeCloseTo(30, 5)
   })
 
+  it('includes rotation so flipped/rotated text stays in the AABB', () => {
+    const base = {
+      id: createEntityId(),
+      type: 'text' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      content: 'CAD',
+      position: { x: 100, y: 80 },
+      fontFamily: 'sans-serif',
+      fontSize: 20,
+      align: 'left' as const,
+    }
+    const upright = entityLocalBounds(base)
+    // Vertical flip bake: rotation π + widthFactor -1 (CSS decompose).
+    const flipped = entityLocalBounds({
+      ...base,
+      rotation: Math.PI,
+      widthFactor: -1,
+    })
+    expect(isValidAABB(flipped)).toBe(true)
+    // Glyphs sit below the baseline after π + scaleX(-1); box must cover that.
+    expect(flipped.maxY).toBeGreaterThan(base.position.y + 1)
+    expect(flipped.minY).toBeGreaterThanOrEqual(upright.minY - 1)
+  })
+
   it('bounds arc text from glyph quads', () => {
     const text = entityLocalBounds({
       id: createEntityId(),

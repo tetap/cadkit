@@ -14,7 +14,11 @@ import {
   type PathsD,
 } from 'clipper2-ts'
 import type { Entity } from '@cadkit/types'
-import { entityToOffsetContours, type OffsetContour } from './offset.js'
+import {
+  entityToOffsetContours,
+  pathsToCompoundContours,
+  type OffsetContour,
+} from './offset.js'
 import type { EntityLookup } from './world-matrix.js'
 
 export type BooleanOp = 'union' | 'subtract' | 'intersect' | 'exclude'
@@ -59,18 +63,18 @@ function contoursToPathsD(contours: readonly OffsetContour[]): PathsD {
   const paths: PathsD = []
   for (const c of contours) {
     const pts = dedupeClose(c.points)
-    if (c.closed && pts.length >= 3) paths.push(toPathD(pts))
+    if (!(c.closed && pts.length >= 3)) continue
+    paths.push(toPathD(pts))
+    for (const hole of c.holes ?? []) {
+      const hp = dedupeClose(hole)
+      if (hp.length >= 3) paths.push(toPathD(hp))
+    }
   }
   return paths
 }
 
-function pathsDToContours(paths: PathsD): OffsetContour[] {
-  const out: OffsetContour[] = []
-  for (const path of paths) {
-    const points = dedupeClose(fromPathD(path))
-    if (points.length >= 3) out.push({ points, closed: true })
-  }
-  return out
+function pathsDToContours(paths: PathsD, precision: number): OffsetContour[] {
+  return pathsToCompoundContours(paths, precision)
 }
 
 /** Closed world contours suitable for boolean ops (empty if entity cannot participate). */
@@ -109,14 +113,14 @@ export function booleanContourGroups(
 
   if (op === 'union') {
     const all: PathsD = pathGroups.flat()
-    return pathsDToContours(booleanOpD(ClipType.Union, all, null, fill, precision))
+    return pathsDToContours(booleanOpD(ClipType.Union, all, null, fill, precision), precision)
   }
 
   if (op === 'subtract') {
     const subject = pathGroups[0]!
     const clip = pathGroups.slice(1).flat()
-    if (!clip.length) return pathsDToContours(subject)
-    return pathsDToContours(differenceD(subject, clip, fill, precision))
+    if (!clip.length) return pathsDToContours(subject, precision)
+    return pathsDToContours(differenceD(subject, clip, fill, precision), precision)
   }
 
   let acc = pathGroups[0]!
@@ -126,7 +130,7 @@ export function booleanContourGroups(
     else acc = xorD(acc, clip, fill, precision)
     if (!acc.length) return []
   }
-  return pathsDToContours(acc)
+  return pathsDToContours(acc, precision)
 }
 
 /** Convenience: entities → boolean result contours in world space. */

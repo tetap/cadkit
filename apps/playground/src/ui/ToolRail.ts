@@ -1,6 +1,8 @@
 import type { Editor, ToolName } from '@cadkit/editor'
 import type { AppStore } from '../app/store.js'
 import { t, type MessageKey } from '../i18n/index.js'
+import { pickFile } from '../pick-file.js'
+import { IMPORT_ACCEPT, importAnyFile } from './AppBar.js'
 import { ICONS, type IconName } from './icons.js'
 import { btnIcon } from './tokens.js'
 
@@ -23,9 +25,12 @@ const TOOLS: ToolDef[] = [
   { name: 'pen', icon: 'pen', labelKey: 'toolPen', tipKey: 'tipPen', shortcut: 'B' },
   { name: 'brush', icon: 'brush', labelKey: 'toolBrush', tipKey: 'tipBrush', shortcut: 'W' },
   { name: 'text', icon: 'text', labelKey: 'toolText', tipKey: 'tipText', shortcut: 'T' },
+  { name: 'image', icon: 'image', labelKey: 'toolImage', tipKey: 'tipImage', shortcut: 'I' },
 ]
 
 const LOGO = `<svg viewBox="0 0 24 24" class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M7 7h10v10H7z"/><path d="M12 4v16M4 12h16"/></svg>`
+
+const IMPORT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M4 19h16"/></svg>`
 
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
@@ -100,6 +105,8 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
         <div class="mb-2 grid h-10 w-10 place-items-center rounded-xl bg-brand shadow-sm shadow-brand/30" title="${escapeAttr(t('appTitle'))}" aria-hidden="true">${LOGO}</div>
         <div class="mb-1 h-px w-7 bg-neutral-300"></div>
         ${toolBtns}
+        <div class="my-1 h-px w-7 bg-neutral-300"></div>
+        ${iconBtn('id="rail-import"', IMPORT_ICON, t('importFile'), t('tipImportFile'))}
       </div>
     `
 
@@ -114,6 +121,13 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
         hideTooltip()
         editor.setTool(btn.dataset.tool as ToolName)
       })
+    })
+
+    el.querySelector('#rail-import')?.addEventListener('click', async () => {
+      hideTooltip()
+      const file = await pickFile(IMPORT_ACCEPT)
+      if (!file) return
+      await importAnyFile(editor, store, file)
     })
   }
 

@@ -64,6 +64,7 @@ export type MessageKey =
   | 'fileMenu'
   | 'newProject'
   | 'importFile'
+  | 'tipImportFile'
   | 'importSvg'
   | 'importDxf'
   | 'importImage'
@@ -111,6 +112,24 @@ export type MessageKey =
   | 'layerVisible'
   | 'layerActive'
   | 'layerMoveSelection'
+  | 'layerReorder'
+  | 'layerDropHint'
+  | 'layerGcode'
+  | 'layerGcodeEmpty'
+  | 'layerGcodeHint'
+  | 'engraveMode'
+  | 'engraveLine'
+  | 'engraveFill'
+  | 'lineSpacing'
+  | 'fillStyle'
+  | 'fillBidirectional'
+  | 'fillCrossHatch'
+  | 'fillShapesIndividually'
+  | 'fillOffset'
+  | 'machineParams'
+  | 'laserPower'
+  | 'feedSpeed'
+  | 'passes'
   | 'devMenu'
   | 'devBack'
   | 'devHint'
@@ -122,7 +141,6 @@ export type MessageKey =
   | 'promptImageUrl'
   | 'stroke'
   | 'fill'
-  | 'opacity'
   | 'fontSize'
   | 'arcText'
   | 'arcRadius'
@@ -270,6 +288,7 @@ const zh: Record<MessageKey, string> = {
   fileMenu: '文件',
   newProject: '新建项目',
   importFile: '导入文件',
+  tipImportFile: '导入 SVG / DXF / 图片到当前文档',
   importSvg: '导入 SVG',
   importDxf: '导入 DXF',
   importImage: '导入图片',
@@ -309,7 +328,7 @@ const zh: Record<MessageKey, string> = {
   svgDpi: 'SVG DPI',
   settingsDpiReset: '恢复默认 (96 / 72)',
   layers: '图层',
-  layersHint: '左侧悬浮面板列出图层与画布元素；点击元素可同步选中。',
+  layersHint: '拖拽 ⋮⋮ 调整图层顺序；拖拽元素到其他图层可换层。',
   layer: '图层',
   layerAdd: '新建图层',
   layerDelete: '删除图层',
@@ -317,6 +336,24 @@ const zh: Record<MessageKey, string> = {
   layerVisible: '可见',
   layerActive: '当前',
   layerMoveSelection: '将选中移到当前图层',
+  layerReorder: '拖拽调整图层顺序',
+  layerDropHint: '拖到其他图层可换层',
+  layerGcode: '雕刻参数',
+  layerGcodeEmpty: '在左侧图层面板中选择一个图层，以编辑 GRBL / G-code 参数。',
+  layerGcodeHint: '参数仅作用于图层，用于后续 G-code 导出；不影响画布渲染。',
+  engraveMode: '雕刻方式',
+  engraveLine: '线雕刻',
+  engraveFill: '填充雕刻',
+  lineSpacing: '线间距',
+  fillStyle: '填充路径样式',
+  fillBidirectional: 'Bi-directional Fill（双向填充）',
+  fillCrossHatch: 'Cross-Hatch（交叉/网格填充）',
+  fillShapesIndividually: 'Fill Shapes Individually（单独填充图形）',
+  fillOffset: 'Offset Fill（偏移填充）',
+  machineParams: '机床参数',
+  laserPower: '功率',
+  feedSpeed: '速度',
+  passes: '次数',
   devMenu: 'Dev',
   devBack: '返回',
   devHint: '开发工具：性能压测与示例种子数据。不会切换路由或销毁编辑器。',
@@ -328,7 +365,6 @@ const zh: Record<MessageKey, string> = {
   promptImageUrl: '输入图片 URL',
   stroke: '描边',
   fill: '填充',
-  opacity: '不透明度',
   fontSize: '字号',
   arcText: '圆弧文字',
   arcRadius: '半径',
@@ -478,6 +514,7 @@ const en: Record<MessageKey, string> = {
   fileMenu: 'File',
   newProject: 'New project',
   importFile: 'Import file',
+  tipImportFile: 'Import SVG, DXF, or images into the document',
   importSvg: 'Import SVG',
   importDxf: 'Import DXF',
   importImage: 'Import image',
@@ -517,7 +554,7 @@ const en: Record<MessageKey, string> = {
   svgDpi: 'SVG DPI',
   settingsDpiReset: 'Reset defaults (96 / 72)',
   layers: 'Layers',
-  layersHint: 'Left dock lists layers and canvas objects; click an object to select it.',
+  layersHint: 'Drag ⋮⋮ to reorder layers; drag objects onto a layer to move them.',
   layer: 'Layer',
   layerAdd: 'Add layer',
   layerDelete: 'Delete layer',
@@ -525,6 +562,24 @@ const en: Record<MessageKey, string> = {
   layerVisible: 'Visible',
   layerActive: 'Active',
   layerMoveSelection: 'Move selection to active layer',
+  layerReorder: 'Drag to reorder layers',
+  layerDropHint: 'Drag onto another layer to move',
+  layerGcode: 'Engrave params',
+  layerGcodeEmpty: 'Select a layer in the layers panel to edit GRBL / G-code parameters.',
+  layerGcodeHint: 'Layer-only settings for future G-code export; not used for canvas rendering.',
+  engraveMode: 'Engrave mode',
+  engraveLine: 'Line',
+  engraveFill: 'Fill',
+  lineSpacing: 'Line spacing',
+  fillStyle: 'Fill path style',
+  fillBidirectional: 'Bi-directional Fill',
+  fillCrossHatch: 'Cross-Hatch',
+  fillShapesIndividually: 'Fill Shapes Individually',
+  fillOffset: 'Offset Fill',
+  machineParams: 'Machine',
+  laserPower: 'Power',
+  feedSpeed: 'Speed',
+  passes: 'Passes',
   devMenu: 'Dev',
   devBack: 'Back',
   devHint: 'Developer tools: stress tests and seed data. Does not dispose the editor.',
@@ -536,7 +591,6 @@ const en: Record<MessageKey, string> = {
   promptImageUrl: 'Enter image URL',
   stroke: 'Stroke',
   fill: 'Fill',
-  opacity: 'Opacity',
   fontSize: 'Font size',
   arcText: 'Arc text',
   arcRadius: 'Radius',

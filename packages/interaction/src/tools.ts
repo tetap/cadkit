@@ -20,7 +20,18 @@ import {
   type AlignGuide,
 } from './align-snap.js'
 import { pickEntity } from './pick.js'
-import { handleEditPatch, translateEntityPatch } from './entity-edit.js'
+import {
+  handleEditPatch,
+  removePolylineVertices,
+  translateEntityPatch,
+  type PathVertexRef,
+} from './entity-edit.js'
+import {
+  comparePathVertexRef,
+  parsePathVertexHandleId,
+  parsePathVertexKey,
+  pathVertexKey,
+} from './path-vertex.js'
 import {
   buildsHandlesForEntity,
   hitTestHandle,
@@ -156,6 +167,8 @@ export class SelectTool implements Tool {
   readonly name = 'select' as const
   private mode: SelectInteractionMode = 'object'
   private editEntityId: EntityId | null = null
+  /** Vertex keys (`o:i` / `h:hi:i`) selected while editing a polyline path. */
+  private selectedVertices = new Set<string>()
   private boxStart: WorldPoint | null = null
   private boxCurrent: WorldPoint | null = null
   private drag: {
@@ -166,7 +179,13 @@ export class SelectTool implements Tool {
     startBounds: AABB
     snapshots: Map<EntityId, Entity>
   } | null = null
-  private handleDrag: { handle: ControlHandle; session: string } | null = null
+  private handleDrag: {
+    handle: ControlHandle
+    session: string
+    startWorld: WorldPoint
+    startCenter?: { x: number; y: number }
+    startRadius?: number
+  } | null = null
   private transformDrag: TransformDrag | null = null
   private suppressBox = false
   private alignGuides: AlignGuide[] = []
@@ -177,6 +196,16 @@ export class SelectTool implements Tool {
 
   getMode(): SelectInteractionMode {
     return this.mode
+  }
+
+  /** Path-edit selected vertices (outer + holes), empty outside edit selection. */
+  getSelectedVertices(): readonly PathVertexRef[] {
+    const refs: PathVertexRef[] = []
+    for (const key of this.selectedVertices) {
+      const ref = parsePathVertexKey(key)
+      if (ref) refs.push(ref)
+    }
+    return refs.sort(comparePathVertexRef)
   }
 
   getAlignGuides(): AlignGuide[] {
@@ -234,15 +263,35 @@ export class SelectTool implements Tool {
       if (!id) return []
       const e = ctx.doc.getEntity(id)
       // Nested group children store geometry in parent-local space — project to world.
-      return e ? buildsHandlesForEntity(e, ctx.camera, (eid) => ctx.doc.getEntity(eid)) : []
+      if (!e) return []
+      const handles = buildsHandlesForEntity(e, ctx.camera, (eid) => ctx.doc.getEntity(eid))
+      if (this.selectedVertices.size === 0 || e.type !== 'polyline') return handles
+      return handles.map((h) => {
+        if (h.kind !== 'endpoint') return h
+        const ref = parsePathVertexHandleId(h.id)
+        if (!ref) return h
+        return this.selectedVertices.has(pathVertexKey(ref)) ? { ...h, selected: true } : h
+      })
     }
     const frame = this.getSelectionFrame(ctx)
-    return frame ? buildTransformHandles(frame.box, ctx.camera, frame.rotation) : []
+    const handles = frame ? buildTransformHandles(frame.box, ctx.camera, frame.rotation) : []
+    // Single arc-text: expose center / radius shortcuts on the canvas.
+    const ids = ctx.selection.toArray()
+    if (ids.length === 1) {
+      const e = ctx.doc.getEntity(ids[0]!)
+      if (e?.type === 'text' && e.path?.kind === 'arc') {
+        handles.push(
+          ...buildsHandlesForEntity(e, ctx.camera, (eid) => ctx.doc.getEntity(eid)),
+        )
+      }
+    }
+    return handles
   }
 
   enterEditMode(entityId: EntityId, ctx: ToolContext): void {
     this.mode = 'edit'
     this.editEntityId = entityId
+    this.selectedVertices.clear()
     ctx.selection.set([entityId])
     ctx.onSelectionEdited?.()
   }
@@ -250,8 +299,28 @@ export class SelectTool implements Tool {
   exitEditMode(ctx: ToolContext, clearSelection = false): void {
     this.mode = 'object'
     this.editEntityId = null
+    this.selectedVertices.clear()
     if (clearSelection) ctx.selection.clear()
     ctx.onSelectionEdited?.()
+  }
+
+  private clearVertexSelection(): void {
+    this.selectedVertices.clear()
+  }
+
+  private selectVertexAtHandle(handle: ControlHandle, shiftKey: boolean): boolean {
+    if (handle.kind !== 'endpoint') return false
+    const ref = parsePathVertexHandleId(handle.id)
+    if (!ref || !Number.isInteger(ref.pointIndex) || ref.pointIndex < 0) return false
+    const key = pathVertexKey(ref)
+    if (shiftKey) {
+      if (this.selectedVertices.has(key)) this.selectedVertices.delete(key)
+      else this.selectedVertices.add(key)
+    } else {
+      this.selectedVertices.clear()
+      this.selectedVertices.add(key)
+    }
+    return true
   }
 
   onPointerDown(screen: ScreenPoint, world: WorldPoint, button: number, ctx: ToolContext): void {
@@ -294,7 +363,7 @@ export class SelectTool implements Tool {
     }
 
     const handles = this.getOverlayHandles(ctx)
-    const handle = hitTestHandle(handles, screen, ctx.camera, 8)
+    const handle = hitTestHandle(handles, screen, ctx.camera, 12)
     if (handle) {
       if (handle.kind === 'scale' || handle.kind === 'rotate') {
         const bounds = this.getSelectionFrameAABB(ctx)
@@ -311,13 +380,40 @@ export class SelectTool implements Tool {
         }
         this.handleDrag = null
       } else {
-        this.handleDrag = { handle, session: `handle:${handle.id}:${Date.now()}` }
+        if (this.mode === 'edit') {
+          this.selectVertexAtHandle(handle, !!ctx.shiftKey)
+          // Shift toggles multi-select only — do not start a drag (avoids
+          // accidentally moving a vertex while deselecting).
+          if (ctx.shiftKey) {
+            this.handleDrag = null
+            this.transformDrag = null
+            this.boxStart = null
+            this.boxCurrent = null
+            this.drag = null
+            this.suppressBox = true
+            ctx.onSelectionEdited?.()
+            return
+          }
+        }
+        const entity = ctx.doc.getEntity(handle.entityId)
+        const arcText =
+          entity?.type === 'text' && entity.path?.kind === 'arc'
+            ? { position: entity.position, radius: entity.path.radius }
+            : null
+        this.handleDrag = {
+          handle,
+          session: `handle:${handle.id}:${Date.now()}`,
+          startWorld: world,
+          startCenter: arcText ? { ...arcText.position } : undefined,
+          startRadius: arcText?.radius,
+        }
         this.transformDrag = null
       }
       this.boxStart = null
       this.boxCurrent = null
       this.drag = null
       this.suppressBox = true
+      ctx.onSelectionEdited?.()
       return
     }
 
@@ -327,15 +423,20 @@ export class SelectTool implements Tool {
       if (this.mode === 'edit' && hit !== this.editEntityId) {
         this.mode = 'object'
         this.editEntityId = null
+        this.clearVertexSelection()
+      } else if (this.mode === 'edit' && hit === this.editEntityId) {
+        this.clearVertexSelection()
       }
       if (ctx.shiftKey) {
         ctx.selection.toggle(target)
         this.mode = 'object'
         this.editEntityId = null
+        this.clearVertexSelection()
       } else if (!ctx.selection.has(target)) {
         ctx.selection.set([target])
         this.mode = 'object'
         this.editEntityId = null
+        this.clearVertexSelection()
       }
       this.beginDrag(ctx, world)
       ctx.onSelectionEdited?.()
@@ -357,6 +458,7 @@ export class SelectTool implements Tool {
     if (this.mode === 'edit') {
       this.mode = 'object'
       this.editEntityId = null
+      this.clearVertexSelection()
     }
     if (!ctx.shiftKey) ctx.selection.clear()
     this.boxStart = world
@@ -420,10 +522,16 @@ export class SelectTool implements Tool {
 
     if (this.handleDrag) {
       this.hoverId = null
-      const { handle, session } = this.handleDrag
+      const { handle, session, startWorld, startCenter, startRadius } = this.handleDrag
       const entity = ctx.doc.getEntity(handle.entityId)
       if (!entity || !ctx.applyPatches) return
-      const patch = handleEditPatch(entity, handle, world, (eid) => ctx.doc.getEntity(eid))
+      const patch = handleEditPatch(
+        entity,
+        handle,
+        world,
+        (eid) => ctx.doc.getEntity(eid),
+        { startWorld, startCenter, startRadius },
+      )
       if (!patch) return
       ctx.applyPatches(new Map([[handle.entityId, patch]]), session)
       ctx.onSelectionEdited?.()
@@ -617,17 +725,50 @@ export class SelectTool implements Tool {
 
   onKeyDown(key: string, ctx: ToolContext): void {
     if (key === 'Delete' || key === 'Backspace') {
+      // Path edit: Delete only removes selected vertices — never the whole entity.
+      if (this.mode === 'edit') {
+        if (
+          this.editEntityId &&
+          this.selectedVertices.size > 0
+        ) {
+          const entity = ctx.doc.getEntity(this.editEntityId)
+          if (entity?.type === 'polyline') {
+            const result = removePolylineVertices(entity, this.getSelectedVertices())
+            if (result === 'remove') {
+              ctx.removeEntities?.([entity.id])
+              ctx.selection.clear()
+              this.mode = 'object'
+              this.editEntityId = null
+              this.clearVertexSelection()
+            } else if (result && ctx.applyPatches) {
+              ctx.applyPatches(
+                new Map([[entity.id, result]]),
+                `vertex-delete:${String(entity.id)}:${Date.now()}`,
+              )
+              this.clearVertexSelection()
+            }
+            ctx.onSelectionEdited?.()
+          }
+        }
+        return
+      }
       const ids = ctx.selection.toArray()
       if (ids.length && ctx.removeEntities) {
         ctx.removeEntities(ids)
         ctx.selection.clear()
         this.mode = 'object'
         this.editEntityId = null
+        this.clearVertexSelection()
         ctx.onSelectionEdited?.()
       }
     }
     if (key === 'Escape') {
       if (this.mode === 'edit') {
+        if (this.selectedVertices.size > 0) {
+          this.clearVertexSelection()
+          ctx.onSelectionEdited?.()
+          return
+        }
         this.exitEditMode(ctx, false)
         return
       }
@@ -1024,6 +1165,11 @@ export class ToolManager {
 
   getSelectMode(): SelectInteractionMode {
     return this.select.getMode()
+  }
+
+  /** Path-edit selected vertices (outer + holes). */
+  getSelectedVertices(): readonly PathVertexRef[] {
+    return this.select.getSelectedVertices()
   }
 
   /** World AABB of the active box-select marquee, if any. */

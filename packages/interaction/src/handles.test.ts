@@ -44,6 +44,44 @@ describe('handles', () => {
     expect(buildsHandlesForEntity(circle, cam)).toHaveLength(2)
   })
 
+  it('builds arc-text center and radius handles at the string midpoint', () => {
+    const cam = new Camera2D()
+    cam.setViewport(800, 600)
+    cam.setZoom(1)
+    const text = {
+      id: createEntityId('t'),
+      type: 'text' as const,
+      layerId: createLayerId(),
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      content: 'HELLO',
+      position: { x: 0, y: 100 },
+      fontFamily: 'sans-serif',
+      fontSize: 16,
+      path: {
+        kind: 'arc' as const,
+        radius: 100,
+        startAngle: -Math.PI / 2 - 0.2,
+        sweep: Math.PI,
+      },
+    }
+    const handles = buildsHandlesForEntity(text, cam)
+    expect(handles).toHaveLength(3)
+    expect(handles.map((h) => h.appearance)).toEqual([
+      'arc-center',
+      'arc-angle',
+      'arc-radius',
+    ])
+    expect(handles[0]!.arcGuide).toBeTruthy()
+    expect(handles[0]!.world.x).toBeCloseTo(0)
+    expect(handles[0]!.world.y).toBeCloseTo(100)
+    // Angle handle sits near the string midpoint (top of the arc).
+    expect(handles[1]!.world.y).toBeLessThan(handles[0]!.world.y)
+    // Radius handle sits past the text AABB right edge (clears scale handle).
+    expect(handles[2]!.world.x).toBeGreaterThan(0)
+  })
+
   it('projects nested child handles through the group world matrix', () => {
     const cam = new Camera2D()
     cam.setViewport(800, 600)

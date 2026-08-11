@@ -21,12 +21,73 @@ import {
   resolveWorldMatrix,
 } from '@cadkit/geometry'
 
+/** Engrave strategy for GRBL / G-code export (not used for canvas rendering). */
+export type LayerEngraveMode = 'line' | 'fill'
+
+/** Fill path styles when `engraveMode === 'fill'`. */
+export type LayerFillStyle =
+  | 'bidirectional'
+  | 'crossHatch'
+  | 'shapesIndividually'
+  | 'offset'
+
+/**
+ * Per-layer GRBL / G-code machining parameters.
+ * Stored on the layer only — entities do not carry their own G-code settings.
+ */
+export interface LayerGcodeParams {
+  /** Line engrave (stroke) vs fill engrave (hatch). */
+  mode: LayerEngraveMode
+  /** Hatch spacing in document units (mm). Only for fill mode. */
+  lineSpacing: number
+  /** Hatch / fill path style. Only for fill mode. */
+  fillStyle: LayerFillStyle
+  /** Laser power (S-word), typically 0–1000. */
+  power: number
+  /** Feed rate in mm/min (F-word). */
+  speed: number
+  /** Number of passes over the same path. */
+  passes: number
+}
+
+export const DEFAULT_LAYER_GCODE: LayerGcodeParams = {
+  mode: 'line',
+  lineSpacing: 0.1,
+  fillStyle: 'bidirectional',
+  power: 500,
+  speed: 1000,
+  passes: 1,
+}
+
+const FILL_STYLE_SET = new Set<LayerFillStyle>([
+  'bidirectional',
+  'crossHatch',
+  'shapesIndividually',
+  'offset',
+])
+
+export function resolveLayerGcode(layer: Layer | undefined | null): LayerGcodeParams {
+  const g = layer?.gcode
+  return {
+    ...DEFAULT_LAYER_GCODE,
+    ...g,
+    mode: g?.mode === 'fill' ? 'fill' : 'line',
+    fillStyle: g?.fillStyle && FILL_STYLE_SET.has(g.fillStyle) ? g.fillStyle : DEFAULT_LAYER_GCODE.fillStyle,
+    lineSpacing: Number.isFinite(g?.lineSpacing) ? Math.max(1e-4, g!.lineSpacing) : DEFAULT_LAYER_GCODE.lineSpacing,
+    power: Number.isFinite(g?.power) ? Math.max(0, g!.power) : DEFAULT_LAYER_GCODE.power,
+    speed: Number.isFinite(g?.speed) ? Math.max(1, g!.speed) : DEFAULT_LAYER_GCODE.speed,
+    passes: Number.isFinite(g?.passes) ? Math.max(1, Math.round(g!.passes)) : DEFAULT_LAYER_GCODE.passes,
+  }
+}
+
 export interface Layer {
   id: LayerId
   name: string
   visible: boolean
   locked: boolean
   color?: string
+  /** GRBL / G-code params for this layer (export only; ignored by renderer). */
+  gcode?: LayerGcodeParams
 }
 
 export interface DocumentChange {
@@ -90,6 +151,8 @@ export class CadDocument {
   private readonly config: DocumentConfig
   private readonly entities = new Map<EntityId, Entity>()
   private readonly layers = new Map<LayerId, Layer>()
+  /** Stable stack order: index 0 = top of the layers panel / drawn last (front). */
+  private layerOrder: LayerId[] = []
   private readonly boundsCache = new Map<EntityId, AABB>()
   private documentBoundsCache: AABB | null = null
   private version = 0
@@ -105,6 +168,7 @@ export class CadDocument {
       locked: false,
       color: '#32cd79',
     })
+    this.layerOrder = [this.defaultLayerId]
   }
 
   getConfig(): DocumentConfig {
@@ -126,11 +190,23 @@ export class CadDocument {
   }
 
   getLayers(): Layer[] {
-    return [...this.layers.values()]
+    return this.layerOrder
+      .map((id) => this.layers.get(id))
+      .filter((layer): layer is Layer => !!layer)
+  }
+
+  /** Front-to-back layer ids (same order as `getLayers()`). */
+  getLayerOrder(): LayerId[] {
+    return [...this.layerOrder]
   }
 
   getLayer(id: LayerId): Layer | undefined {
     return this.layers.get(id)
+  }
+
+  /** Index in stack order, or -1. Lower index = closer to front. */
+  getLayerIndex(id: LayerId): number {
+    return this.layerOrder.indexOf(id)
   }
 
   addLayer(input?: { name?: string; color?: string; visible?: boolean; locked?: boolean }): Layer {
@@ -143,13 +219,39 @@ export class CadDocument {
       color: input?.color ?? nextLayerColor(this.layers.size),
     }
     this.layers.set(id, layer)
+    // New layers appear at the front of the stack.
+    this.layerOrder.unshift(id)
     this.version++
     return layer
   }
 
+  /**
+   * Reorder layers. `orderedIds` must be a permutation of existing layer ids
+   * (extras ignored; missing ids keep their relative order at the end).
+   */
+  reorderLayers(orderedIds: readonly LayerId[]): LayerId[] {
+    const seen = new Set<LayerId>()
+    const next: LayerId[] = []
+    for (const id of orderedIds) {
+      if (!this.layers.has(id) || seen.has(id)) continue
+      seen.add(id)
+      next.push(id)
+    }
+    for (const id of this.layerOrder) {
+      if (!seen.has(id) && this.layers.has(id)) next.push(id)
+    }
+    const same =
+      next.length === this.layerOrder.length && next.every((id, i) => id === this.layerOrder[i])
+    if (!same) {
+      this.layerOrder = next
+      this.version++
+    }
+    return [...this.layerOrder]
+  }
+
   updateLayer(
     id: LayerId,
-    patch: Partial<Pick<Layer, 'name' | 'visible' | 'locked' | 'color'>>,
+    patch: Partial<Pick<Layer, 'name' | 'visible' | 'locked' | 'color' | 'gcode'>>,
   ): Layer | null {
     const prev = this.layers.get(id)
     if (!prev) return null
@@ -158,6 +260,10 @@ export class CadDocument {
       ...patch,
       id: prev.id,
       name: patch.name !== undefined ? patch.name.trim() || prev.name : prev.name,
+      gcode:
+        patch.gcode !== undefined
+          ? { ...resolveLayerGcode(prev), ...patch.gcode }
+          : prev.gcode,
     }
     this.layers.set(id, next)
     this.version++
@@ -181,6 +287,7 @@ export class CadDocument {
       }
     }
     this.layers.delete(id)
+    this.layerOrder = this.layerOrder.filter((lid) => lid !== id)
     if (this.defaultLayerId === id) this.defaultLayerId = dest
     this.version++
     this.invalidateDocumentBounds()
@@ -597,7 +704,7 @@ export class CadDocument {
       schemaVersion: this.config.schemaVersion,
       unit: this.config.unit,
       tolerance: this.config.tolerance,
-      layers: [...this.layers.values()],
+      layers: this.getLayers(),
       entities: this.getEntities(),
     }
   }
@@ -608,10 +715,14 @@ export class CadDocument {
       unit: data.unit,
       tolerance: data.tolerance,
     })
+    doc.layers.clear()
+    doc.layerOrder = []
     for (const layer of data.layers) {
       doc.layers.set(layer.id, layer)
+      doc.layerOrder.push(layer.id)
     }
     if (data.layers[0]) doc.defaultLayerId = data.layers[0].id
+    else if (doc.layerOrder[0]) doc.defaultLayerId = doc.layerOrder[0]!
     doc.addMany(data.entities)
     return doc
   }

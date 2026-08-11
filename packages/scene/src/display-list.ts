@@ -83,7 +83,7 @@ interface GeomCacheEntry {
   lodBin: number
   /** Invalidates when layer color / visibility styling changes. */
   layerEpoch: number
-  item: RenderItem
+  items: RenderItem[]
 }
 
 export class SceneProjector {
@@ -260,28 +260,29 @@ export class SceneProjector {
         cached.lodBin === bin &&
         cached.layerEpoch === this.layerEpoch
       ) {
-        items.push({ ...cached.item, bounds })
+        for (const it of cached.items) items.push({ ...it, bounds })
         cacheHits++
         continue
       }
 
-      const item = this.projectEntity(entity, bounds, pixelError, worldPerPixel, bin)
-      if (item) {
+      const projected = this.projectEntity(entity, bounds, pixelError, worldPerPixel, bin)
+      if (projected.length) {
         this.geomCache.set(id, {
           entityVersion: entity.version,
           lodBin: bin,
           layerEpoch: this.layerEpoch,
-          item,
+          items: projected,
         })
-        items.push(item)
+        items.push(...projected)
         cacheMisses++
       }
     }
 
+    // Layer stack first (higher zOrder = front), then batch by kind/style.
     items.sort((a, b) => {
+      if (a.zOrder !== b.zOrder) return a.zOrder - b.zOrder
       if (a.kind !== b.kind) return a.kind.localeCompare(b.kind)
-      if (a.styleKey !== b.styleKey) return a.styleKey.localeCompare(b.styleKey)
-      return a.zOrder - b.zOrder
+      return a.styleKey.localeCompare(b.styleKey)
     })
 
     let batchHints = 0
@@ -357,17 +358,24 @@ export class SceneProjector {
     pixelError: number,
     worldPerPixel: number,
     lod: number,
-  ): RenderItem | null {
+  ): RenderItem[] {
     const paint = this.resolveEntityPaint(entity)
     const styleKey = `${paint.stroke}|${paint.strokeWidth}|${paint.fill ?? ''}|${entity.layerId}`
     const pickId = this.pickIds.get(entity.id) ?? 0
+    // Panel top (index 0) draws in front: invert index into a large z band.
+    const layerIndex = this.doc.getLayerIndex(entity.layerId)
+    const layerCount = Math.max(1, this.doc.getLayers().length)
+    const layerBand =
+      layerIndex < 0 ? 0 : (layerCount - 1 - layerIndex) * 1_000_000
+    const hasHoles = entity.type === 'polyline' && !!entity.holes?.length
     const base = {
       id: entity.id,
-      zOrder: 0,
+      zOrder: layerBand + (pickId & 0xfffff),
       styleKey,
       stroke: paint.stroke,
       strokeWidth: paint.strokeWidth,
-      fill: paint.fill,
+      // Holes need even-odd fill; until then stroke-only for compound paths.
+      fill: hasHoles ? undefined : paint.fill,
       bounds,
       lod,
       pickId,
@@ -375,33 +383,52 @@ export class SceneProjector {
 
     const m = resolveWorldMatrix(entity, (id) => this.doc.getEntity(id))
     const wp = (x: number, y: number) => transformPoint(m, { x, y })
+    const packRing = (pts: Array<{ x: number; y: number }>, close: boolean): Float64Array => {
+      const n = pts.length
+      const coords = new Float64Array((n + (close && n >= 2 ? 1 : 0)) * 2)
+      pts.forEach((p, i) => {
+        const q = wp(p.x, p.y)
+        coords[i * 2] = q.x
+        coords[i * 2 + 1] = q.y
+      })
+      if (close && n >= 2) {
+        const q = wp(pts[0]!.x, pts[0]!.y)
+        coords[n * 2] = q.x
+        coords[n * 2 + 1] = q.y
+      }
+      return coords
+    }
 
     switch (entity.type) {
       case 'line': {
         const a = wp(entity.start.x, entity.start.y)
         const b = wp(entity.end.x, entity.end.y)
-        return {
-          ...base,
-          kind: 'line',
-          coords: new Float64Array([a.x, a.y, b.x, b.y]),
-        }
+        return [
+          {
+            ...base,
+            kind: 'line',
+            coords: new Float64Array([a.x, a.y, b.x, b.y]),
+          },
+        ]
       }
       case 'polyline': {
-        const pts = entity.points
-        const n = pts.length
-        const close = entity.closed && n >= 2
-        const coords = new Float64Array((n + (close ? 1 : 0)) * 2)
-        pts.forEach((p, i) => {
-          const q = wp(p.x, p.y)
-          coords[i * 2] = q.x
-          coords[i * 2 + 1] = q.y
-        })
-        if (close) {
-          const q = wp(pts[0]!.x, pts[0]!.y)
-          coords[n * 2] = q.x
-          coords[n * 2 + 1] = q.y
+        const items: RenderItem[] = [
+          {
+            ...base,
+            kind: 'polyline',
+            coords: packRing(entity.points, entity.closed && entity.points.length >= 2),
+          },
+        ]
+        for (const hole of entity.holes ?? []) {
+          if (hole.length < 2) continue
+          items.push({
+            ...base,
+            kind: 'polyline',
+            fill: undefined,
+            coords: packRing(hole, true),
+          })
         }
-        return { ...base, kind: 'polyline', coords }
+        return items
       }
       case 'bezier': {
         // points packed as chained cubics [p0,c1,c2,p1,...]; sample to a polyline.
@@ -412,7 +439,7 @@ export class SceneProjector {
           coords[i * 2] = q.x
           coords[i * 2 + 1] = q.y
         })
-        return { ...base, kind: 'polyline', coords }
+        return [{ ...base, kind: 'polyline', coords }]
       }
       case 'circle': {
         const center = wp(entity.center.x, entity.center.y)
@@ -424,7 +451,7 @@ export class SceneProjector {
           coords[i * 2] = p.x
           coords[i * 2 + 1] = p.y
         })
-        return { ...base, kind: 'circle', coords }
+        return [{ ...base, kind: 'circle', coords }]
       }
       case 'arc': {
         const center = wp(entity.center.x, entity.center.y)
@@ -447,10 +474,9 @@ export class SceneProjector {
           coords[i * 2] = p.x
           coords[i * 2 + 1] = p.y
         })
-        return { ...base, kind: 'arc', coords }
+        return [{ ...base, kind: 'arc', coords }]
       }
       case 'ellipse': {
-        const center = wp(entity.center.x, entity.center.y)
         const segments = Math.max(24, Math.ceil(64 / Math.max(worldPerPixel, 1e-6)))
         const coords = new Float64Array((segments + 1) * 2)
         for (let i = 0; i <= segments; i++) {
@@ -461,35 +487,39 @@ export class SceneProjector {
           coords[i * 2] = q.x
           coords[i * 2 + 1] = q.y
         }
-        return { ...base, kind: 'polyline', coords }
+        return [{ ...base, kind: 'polyline', coords }]
       }
       case 'text': {
         if (aabbWidth(bounds) / worldPerPixel < 4 || aabbHeight(bounds) / worldPerPixel < 4) {
-          return null
+          return []
         }
         const pos = wp(entity.position.x, entity.position.y)
-        return {
-          ...base,
-          kind: 'text',
-          coords: new Float64Array([pos.x, pos.y, entity.fontSize]),
-        }
+        return [
+          {
+            ...base,
+            kind: 'text',
+            coords: new Float64Array([pos.x, pos.y, entity.fontSize]),
+          },
+        ]
       }
       case 'image': {
         const o = wp(entity.origin.x, entity.origin.y)
         const tr = wp(entity.origin.x + entity.width, entity.origin.y)
         const br = wp(entity.origin.x + entity.width, entity.origin.y + entity.height)
         const bl = wp(entity.origin.x, entity.origin.y + entity.height)
-        return {
-          ...base,
-          kind: 'image',
-          coords: new Float64Array([o.x, o.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]),
-          uv: new Float64Array([0, 0, 1, 0, 1, 1, 0, 1]),
-          assetId: entity.assetId ?? entity.href,
-          filters: entity.filters,
-        }
+        return [
+          {
+            ...base,
+            kind: 'image',
+            coords: new Float64Array([o.x, o.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]),
+            uv: new Float64Array([0, 0, 1, 0, 1, 1, 0, 1]),
+            assetId: entity.assetId ?? entity.href,
+            filters: entity.filters,
+          },
+        ]
       }
       default:
-        return null
+        return []
     }
   }
 }

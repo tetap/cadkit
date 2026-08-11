@@ -1,10 +1,15 @@
 import {
   areaD,
+  booleanOpDWithPolyTree,
+  ClipType,
+  FillRule,
   inflatePathsD,
   EndType,
   JoinType,
+  PolyTreeD,
   type PathD,
   type PathsD,
+  type PolyPathD,
 } from 'clipper2-ts'
 import type { Entity, EntityId, Vec2 } from '@cadkit/types'
 import { entityWorldBounds } from './bounds.js'
@@ -35,6 +40,8 @@ export interface OffsetOptions {
 export interface OffsetContour {
   points: Vec2[]
   closed: boolean
+  /** Inner hole rings (compound closed path). Opposite winding to `points`. */
+  holes?: Vec2[][]
 }
 
 const JOIN_MAP: Record<OffsetJoin, JoinType> = {
@@ -122,7 +129,19 @@ export function entityToOffsetContours(
     case 'polyline': {
       const pts = dedupeClose(transformContour(entity.points, m))
       if (pts.length < 2) return []
-      return [{ closed: entity.closed, points: pts }]
+      const holes =
+        entity.closed && entity.holes?.length
+          ? entity.holes
+              .map((h) => dedupeClose(transformContour(h, m)))
+              .filter((h) => h.length >= 3)
+          : undefined
+      return [
+        {
+          closed: entity.closed,
+          points: pts,
+          ...(holes?.length ? { holes } : {}),
+        },
+      ]
     }
     case 'bezier': {
       const sampled = tessellateCubicChain(
@@ -224,6 +243,11 @@ export function offsetContours(
     if (c.closed) {
       if (pts.length < 3) continue
       closed.push(toPathD(pts))
+      // Holes keep opposite winding so Clipper contracts them on positive delta.
+      for (const hole of c.holes ?? []) {
+        const hp = dedupeClose(hole)
+        if (hp.length >= 3) closed.push(toPathD(hp))
+      }
     } else {
       if (pts.length < 2) continue
       open.push(toPathD(pts))
@@ -243,10 +267,8 @@ export function offsetContours(
       arcTolerance,
     )
     if (options.outerShapesOnly) result = filterOuterOnly(result)
-    for (const path of result) {
-      const points = dedupeClose(fromPathD(path))
-      if (points.length >= 3) out.push({ points, closed: true })
-    }
+    // Re-union into a PolyTree so outer + holes stay one compound contour.
+    out.push(...pathsToCompoundContours(result, precision))
   }
 
   if (open.length) {
@@ -264,6 +286,80 @@ export function offsetContours(
   return out
 }
 
+/** Flatten compound contours (outer + holes) into a Clipper PathsD list. */
+function contoursToClosedPathsD(contours: readonly OffsetContour[]): PathsD {
+  const closed: PathsD = []
+  for (const c of contours) {
+    const pts = dedupeClose(c.points)
+    if (!(c.closed && pts.length >= 3)) continue
+    closed.push(toPathD(pts))
+    for (const hole of c.holes ?? []) {
+      const hp = dedupeClose(hole)
+      if (hp.length >= 3) closed.push(toPathD(hp))
+    }
+  }
+  return closed
+}
+
+/**
+ * Union closed paths and rebuild nesting via PolyTree so each outer keeps its
+ * holes as one compound contour (instead of separate sibling paths).
+ */
+export function pathsToCompoundContours(paths: PathsD, precision: number): OffsetContour[] {
+  if (paths.length === 0) return []
+  if (paths.length === 1) {
+    const points = dedupeClose(fromPathD(paths[0]!))
+    return points.length >= 3 ? [{ points, closed: true }] : []
+  }
+  const tree = new PolyTreeD()
+  booleanOpDWithPolyTree(ClipType.Union, paths, null, tree, FillRule.NonZero, precision)
+  return polyTreeToCompoundContours(tree)
+}
+
+function polyTreeToCompoundContours(node: PolyPathD): OffsetContour[] {
+  const out: OffsetContour[] = []
+  for (let i = 0; i < node.count; i++) {
+    const child = node.child(i)
+    const poly = child.poly
+    if (!poly || poly.length < 3) continue
+    const points = dedupeClose(fromPathD(poly))
+    if (points.length < 3) continue
+
+    const holes: Vec2[][] = []
+    // Direct children of an outer are holes; grandchildren are islands → recurse.
+    for (let j = 0; j < child.count; j++) {
+      const holeNode = child.child(j)
+      const holePoly = holeNode.poly
+      if (holePoly && holePoly.length >= 3) {
+        const hp = dedupeClose(fromPathD(holePoly))
+        if (hp.length >= 3) holes.push(hp)
+      }
+      if (holeNode.count > 0) {
+        out.push(...polyTreeToCompoundContours(holeNode))
+      }
+    }
+    out.push({
+      points,
+      closed: true,
+      ...(holes.length ? { holes } : {}),
+    })
+  }
+  return out
+}
+
+/** Union closed contours so multi-select offsets do not leave overlapping loops. */
+function unionClosedContours(
+  contours: readonly OffsetContour[],
+  precision: number,
+): OffsetContour[] {
+  const closed = contoursToClosedPathsD(contours)
+  if (closed.length === 0) return []
+  if (closed.length === 1 && !contours.some((c) => c.holes?.length)) {
+    return [{ points: fromPathD(closed[0]!), closed: true }]
+  }
+  return pathsToCompoundContours(closed, precision)
+}
+
 /** Convenience: entity → offset contours in world space. */
 export function offsetEntity(
   entity: Entity,
@@ -276,16 +372,57 @@ export function offsetEntity(
   return offsetContours(contours, options)
 }
 
+/**
+ * Offset many entities. Closed subjects are unioned before offset, and closed
+ * offset results are unioned again so overlapping loops collapse to one outline.
+ */
 export function offsetEntities(
   entities: readonly Entity[],
   options: OffsetOptions,
   lookup: EntityLookup,
 ): OffsetContour[] {
-  const all: OffsetContour[] = []
+  const precision = options.precision ?? 4
+  const closedSources: OffsetContour[] = []
+  const openSources: OffsetContour[] = []
   for (const e of entities) {
-    all.push(...offsetEntity(e, options, lookup))
+    for (const c of entityToOffsetContours(e, lookup, { arcTolerance: options.arcTolerance })) {
+      const pts = dedupeClose(c.points)
+      if (c.closed && pts.length >= 3) {
+        closedSources.push({
+          points: pts,
+          closed: true,
+          ...(c.holes?.length
+            ? {
+                holes: c.holes
+                  .map((h) => dedupeClose(h))
+                  .filter((h) => h.length >= 3),
+              }
+            : {}),
+        })
+      } else if (!c.closed && pts.length >= 2) {
+        openSources.push({ points: pts, closed: false })
+      }
+    }
   }
-  return all
+
+  // Union (PolyTree) first so nested selections become one outer+holes subject.
+  const subjects =
+    closedSources.length > 1 || closedSources.some((c) => c.holes?.length)
+      ? unionClosedContours(closedSources, precision)
+      : closedSources
+
+  let closedOut = offsetContours(subjects, options)
+  const openOut = offsetContours(openSources, options)
+
+  // Final union keeps multiple outers separate but each retains its holes.
+  if (closedOut.length > 1 || closedOut.some((c) => c.holes?.length)) {
+    closedOut = unionClosedContours(closedOut, precision)
+  }
+  if (options.outerShapesOnly && closedOut.length > 0) {
+    closedOut = closedOut.map((c) => ({ points: c.points, closed: true as const }))
+  }
+
+  return [...closedOut, ...openOut]
 }
 
 export type { EntityId }

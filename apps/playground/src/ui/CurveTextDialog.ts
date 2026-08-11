@@ -1,5 +1,9 @@
 import type { Editor } from '@cadkit/editor'
-import { placeArcTextCentered, placeStraightTextFromArc } from '@cadkit/geometry'
+import {
+  placeArcTextCentered,
+  placeStraightTextFromArc,
+  updateArcTextPath,
+} from '@cadkit/geometry'
 import type { Entity, EntityId, TextArcPath, TextEntity } from '@cadkit/types'
 import { t } from '../i18n/index.js'
 import { btnGhost, fieldControl, fieldLabel } from './tokens.js'
@@ -106,6 +110,20 @@ export function openCurveTextDialog(
     root.querySelector('#ct-close')?.addEventListener('click', close)
     root.querySelector('#ct-done')?.addEventListener('click', close)
 
+    const syncStartField = (startAngle: number) => {
+      const startEl = root.querySelector<HTMLInputElement>('#ct-start')
+      if (startEl) startEl.value = ((startAngle * 180) / Math.PI).toFixed(0)
+    }
+
+    /** Radius-only: keep string midpoint fixed and reflow startAngle. */
+    const writeRadius = (radius: number) => {
+      const te2 = readEntity()
+      if (!te2?.path || te2.path.kind !== 'arc' || !(radius > 0)) return
+      const placed = updateArcTextPath(te2, { radius })
+      applyArc(placed.path, placed.position)
+      syncStartField(placed.path.startAngle)
+    }
+
     const writeFromFields = () => {
       const te2 = readEntity()
       if (!te2?.path || te2.path.kind !== 'arc') return
@@ -117,27 +135,14 @@ export function openCurveTextDialog(
       const radius = Number.isFinite(r) && r > 0 ? r : te2.path.radius
       const startAngle = (Number.isFinite(start) ? start : -90) * (Math.PI / 180)
       const sweepRad = (Number.isFinite(sweep) ? sweep : 180) * (Math.PI / 180)
-      // Keep the current arc midpoint fixed while editing radius/angles.
-      const midAngle = te2.path.startAngle + te2.path.sweep / 2
-      const apex = {
-        x: te2.position.x + te2.path.radius * Math.cos(midAngle),
-        y: te2.position.y + te2.path.radius * Math.sin(midAngle),
-      }
-      const newMid = startAngle + sweepRad / 2
-      const position = {
-        x: apex.x - radius * Math.cos(newMid),
-        y: apex.y - radius * Math.sin(newMid),
-      }
-      applyArc(
-        {
-          kind: 'arc',
-          radius,
-          startAngle,
-          sweep: sweepRad,
-          baseline: base,
-        },
-        position,
-      )
+      // Pivot on the string midpoint (text calculation center), not path sweep/2.
+      const placed = updateArcTextPath(te2, {
+        radius,
+        sweep: sweepRad,
+        baseline: base,
+        startAngle,
+      })
+      applyArc(placed.path, placed.position)
     }
 
     root.querySelector('#ct-enable')?.addEventListener('change', (ev) => {
@@ -159,7 +164,7 @@ export function openCurveTextDialog(
       const num = root.querySelector<HTMLInputElement>('#ct-r-num')
       if (range) range.value = String(v)
       if (num) num.value = String(v)
-      writeFromFields()
+      writeRadius(v)
     }
     root.querySelector('#ct-r')?.addEventListener('input', (ev) => {
       syncR(Number((ev.target as HTMLInputElement).value))

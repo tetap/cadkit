@@ -1,5 +1,9 @@
 import type { Editor } from '@cadkit/editor'
-import { placeArcTextCentered, placeStraightTextFromArc } from '@cadkit/geometry'
+import {
+  placeArcTextCentered,
+  placeStraightTextFromArc,
+  updateArcTextPath,
+} from '@cadkit/geometry'
 import type { Entity, ImageEntity, TextEntity } from '@cadkit/types'
 import type { AppStore } from '../app/store.js'
 import { refreshHotFromSelection } from '../bindEditorEvents.js'
@@ -21,7 +25,7 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
         </div>
         <div class="${sectionCard}">
           <h3 class="${sectionTitle}">${t('style')}</h3>
-          ${styleRows(hot.stroke, hot.fill, hot.opacity)}
+          ${styleRows(hot.stroke, hot.fill)}
         </div>`
       bindStyle(el, editor, store)
       return
@@ -100,7 +104,7 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
       </div>
       <div class="${sectionCard}">
         <h3 class="${sectionTitle}">${t('style')}</h3>
-        ${styleRows(hot.stroke, hot.fill, hot.opacity)}
+        ${styleRows(hot.stroke, hot.fill)}
       </div>
       ${extra}`
 
@@ -158,28 +162,35 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
       const r = Number.isFinite(radius) && radius > 0 ? radius : te.path.radius
       const startAngle = (Number.isFinite(startDeg) ? startDeg : -90) * (Math.PI / 180)
       const sweep = (Number.isFinite(sweepDeg) ? sweepDeg : 180) * (Math.PI / 180)
-      const midAngle = te.path.startAngle + te.path.sweep / 2
-      const apex = {
-        x: te.position.x + te.path.radius * Math.cos(midAngle),
-        y: te.position.y + te.path.radius * Math.sin(midAngle),
-      }
-      const newMid = startAngle + sweep / 2
-      const position = {
-        x: apex.x - r * Math.cos(newMid),
-        y: apex.y - r * Math.sin(newMid),
-      }
+      // Pivot on string midpoint; pass startAngle only when the user edited angles/baseline.
+      const placed = updateArcTextPath(te, { radius: r, sweep, baseline, startAngle })
       editor.updateEntity(
         id,
         {
-          position,
-          path: { kind: 'arc', radius: r, startAngle, sweep, baseline },
+          position: placed.position,
+          path: placed.path,
         } as Partial<Entity>,
         'ins-arc',
       )
       refreshHotFromSelection(editor, store)
     }
+    const applyArcRadius = () => {
+      const e = editor.document.getEntity(id)
+      if (!e || e.type !== 'text' || e.path?.kind !== 'arc') return
+      const te = e as TextEntity
+      const radius = Number((el.querySelector('#ins-arc-r') as HTMLInputElement | null)?.value)
+      if (!(Number.isFinite(radius) && radius > 0)) return
+      const placed = updateArcTextPath(te, { radius })
+      editor.updateEntity(
+        id,
+        { position: placed.position, path: placed.path } as Partial<Entity>,
+        'ins-arc-r',
+      )
+      refreshHotFromSelection(editor, store)
+    }
     el.querySelector('#ins-arc')?.addEventListener('change', applyArcPath)
-    for (const key of ['#ins-arc-r', '#ins-arc-start', '#ins-arc-sweep', '#ins-arc-base']) {
+    el.querySelector('#ins-arc-r')?.addEventListener('change', applyArcRadius)
+    for (const key of ['#ins-arc-start', '#ins-arc-sweep', '#ins-arc-base']) {
       el.querySelector(key)?.addEventListener('change', applyArcPath)
     }
 
@@ -209,14 +220,12 @@ export function mountInspectorPanel(el: HTMLElement, editor: Editor, store: AppS
   return store.subscribeKeys(['hot', 'selectionIds', 'localeTick', 'uiEpoch'], render)
 }
 
-function styleRows(stroke: string, fill: string, opacity: number): string {
+function styleRows(stroke: string, fill: string): string {
   return `
     <div class="${row}"><label class="text-muted">${t('stroke')}</label>
       <input type="color" id="ins-stroke" class="h-8 w-full cursor-pointer rounded border border-neutral-300 bg-white p-0.5" value="${toColor(stroke)}" /></div>
     <div class="${row}"><label class="text-muted">${t('fill')}</label>
-      <input type="color" id="ins-fill" class="h-8 w-full cursor-pointer rounded border border-neutral-300 bg-white p-0.5" value="${toColor(fill)}" /></div>
-    <div class="${row}"><label class="text-muted">${t('opacity')}</label>
-      <input type="number" id="ins-opacity" class="${fieldControl}" min="0" max="1" step="0.05" value="${opacity}" /></div>`
+      <input type="color" id="ins-fill" class="h-8 w-full cursor-pointer rounded border border-neutral-300 bg-white p-0.5" value="${toColor(fill)}" /></div>`
 }
 
 function bindStyle(el: HTMLElement, editor: Editor, store: AppStore): void {
@@ -229,10 +238,6 @@ function bindStyle(el: HTMLElement, editor: Editor, store: AppStore): void {
   })
   el.querySelector('#ins-fill')?.addEventListener('input', (ev) => {
     apply({ fill: (ev.target as HTMLInputElement).value })
-  })
-  el.querySelector('#ins-opacity')?.addEventListener('change', (ev) => {
-    const v = Number((ev.target as HTMLInputElement).value)
-    if (Number.isFinite(v)) apply({ opacity: v })
   })
 }
 
