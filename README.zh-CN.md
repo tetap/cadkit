@@ -20,7 +20,9 @@
 </p>
 
 <p align="center">
-  <a href="#快速开始"><b>快速开始 →</b></a>
+  <a href="https://tetap.github.io/cadkit/"><b>在线演示 →</b></a>
+  &nbsp;·&nbsp;
+  <a href="#快速开始">快速开始</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/tetap/cadkit/tree/main/apps/docs">文档</a>
   &nbsp;·&nbsp;

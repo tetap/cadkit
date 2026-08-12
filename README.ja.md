@@ -20,7 +20,9 @@
 </p>
 
 <p align="center">
-  <a href="#クイックスタート"><b>クイックスタート →</b></a>
+  <a href="https://tetap.github.io/cadkit/"><b>ライブデモ →</b></a>
+  &nbsp;·&nbsp;
+  <a href="#クイックスタート">クイックスタート</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/tetap/cadkit/tree/main/apps/docs">Docs</a>
   &nbsp;·&nbsp;

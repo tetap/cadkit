@@ -8,7 +8,12 @@ function pkg(name: string) {
   return path.resolve(root, `packages/${name}/src/index.ts`)
 }
 
+// GitHub Pages project site: https://tetap.github.io/cadkit/
+// Local / preview keep `/`. Override with VITE_BASE=/cadkit/
+const base = process.env.VITE_BASE || '/'
+
 export default defineConfig({
+  base,
   plugins: [tailwindcss()],
   resolve: {
     alias: {
