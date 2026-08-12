@@ -55,6 +55,38 @@ export function travelLength(paths: readonly Vec2[][], start: Vec2 = { x: 0, y: 
 }
 
 /**
+ * Preserve generation order (hatch scanline rows). Merge path i→i+1 only when
+ * geometrically adjacent — never jump ahead via global nearest-neighbor.
+ * This keeps fill serpentine coherent; use {@link chainNearbyPaths} /
+ * {@link optimizePathOrder} for outline / linework reordering.
+ */
+export function chainHatchPaths(paths: readonly Vec2[][], tol: number): Vec2[][] {
+  const usable = paths.filter((p) => p.length >= 2).map((p) => p.map((q) => ({ ...q })))
+  if (usable.length <= 1 || !(tol > 0)) return usable
+
+  const out: Vec2[][] = []
+  let chain = usable[0]!
+  for (let i = 1; i < usable.length; i++) {
+    const next = usable[i]!
+    const end = chain[chain.length - 1]!
+    const a = next[0]!
+    const b = next[next.length - 1]!
+    const d0 = Math.hypot(end.x - a.x, end.y - a.y)
+    const d1 = Math.hypot(end.x - b.x, end.y - b.y)
+    if (d0 <= tol || d1 <= tol) {
+      const oriented = d1 + 1e-12 < d0 ? next.slice().reverse() : next
+      const join = Math.hypot(end.x - oriented[0]!.x, end.y - oriented[0]!.y)
+      chain = join < 1e-9 ? chain.concat(oriented.slice(1)) : chain.concat(oriented)
+    } else {
+      out.push(chain)
+      chain = next
+    }
+  }
+  out.push(chain)
+  return out
+}
+
+/**
  * Greedily merge paths when the end of A is within `tol` of an endpoint of B.
  * Turns alternating hatch rows into long serpentine polylines.
  */

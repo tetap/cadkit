@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   bestOrientation,
+  chainHatchPaths,
   chainNearbyPaths,
   optimizePathOrder,
   travelLength,
@@ -67,6 +68,33 @@ describe('optimizePathOrder', () => {
     // Near joins keep bridge vertices → one continuous cut, zero empty travel.
     expect(chained[0]!.length).toBeGreaterThanOrEqual(4)
     expect(travelLength(chained, { x: 0, y: 0 })).toBe(0)
+  })
+
+  it('chainHatchPaths keeps scanline order and joins adjacent rows', () => {
+    const rows = [
+      [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+      ],
+      [
+        { x: 10, y: 1 },
+        { x: 0, y: 1 },
+      ],
+      [
+        { x: 0, y: 2 },
+        { x: 10, y: 2 },
+      ],
+      // Gap → new chain (far from previous end)
+      [
+        { x: 100, y: 0 },
+        { x: 110, y: 0 },
+      ],
+    ]
+    const chained = chainHatchPaths(rows, 1.1)
+    expect(chained).toHaveLength(2)
+    expect(chained[0]![0]).toEqual({ x: 0, y: 0 })
+    expect(chained[0]!.at(-1)).toEqual({ x: 10, y: 2 })
+    expect(chained[1]![0]).toEqual({ x: 100, y: 0 })
   })
 
   it('2-opt improves a crossed tour', () => {

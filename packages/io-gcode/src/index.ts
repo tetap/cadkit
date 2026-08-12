@@ -20,6 +20,7 @@ export {
 export {
   optimizePathOrder,
   chainNearbyPaths,
+  chainHatchPaths,
   bestOrientation,
   travelLength,
   type OptimizeOrderOptions,

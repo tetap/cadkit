@@ -160,6 +160,54 @@ describe('exportGcode', () => {
     expect(crossed.cuts.length).toBeGreaterThan(vertical.cuts.length)
   })
 
+  it('fill hatch keeps serpentine row order (not NN-scrambled)', () => {
+    const doc = new CadDocument()
+    const layer = doc.addLayer({ name: 'FillOrder' })
+    doc.updateLayer(layer.id, {
+      gcode: {
+        mode: 'fill',
+        lineSpacing: 2,
+        fillStyle: 'bidirectional',
+        fillAngle: 0,
+        power: 500,
+        speed: 1000,
+        passes: 1,
+      },
+    })
+    doc.add({
+      id: createEntityId('poly'),
+      type: 'polyline',
+      layerId: layer.id,
+      style: { fill: '#111' },
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      closed: true,
+      points: [
+        { x: 0, y: 0 },
+        { x: 40, y: 0 },
+        { x: 40, y: 20 },
+        { x: 0, y: 20 },
+      ],
+    })
+    const input = {
+      entities: doc.getEntities(),
+      layers: doc.getLayers(),
+      getEntity: (id: ReturnType<typeof createEntityId>) => doc.getEntity(id),
+    }
+    // Raw scanline segments (no chain): Y of successive rows must be monotone.
+    const raw = buildToolpaths(input, { flipY: false, optimizeOrder: false })
+    const rowY = raw.cuts.map((c) => (c.points[0]!.y + c.points.at(-1)!.y) / 2)
+    for (let i = 1; i < rowY.length; i++) {
+      expect(rowY[i]!).toBeGreaterThanOrEqual(rowY[i - 1]! - 1e-6)
+    }
+    // Optimized fill: serpentine chain — one (or few) paths, starts on first row.
+    const opt = buildToolpaths(input, { flipY: false, optimizeOrder: true })
+    expect(opt.cuts.length).toBeLessThan(raw.cuts.length)
+    expect(opt.cuts[0]!.points[0]!.y).toBeCloseTo(rowY[0]!, 5)
+    // Empty travel should stay tiny vs cutting a hatch with NN jumps.
+    expect(opt.totalLength - opt.cutLength).toBeLessThan(raw.cuts.length)
+  })
+
   it('buildToolpaths orders cuts and reports progress lengths', () => {
     const doc = new CadDocument()
     const layer = doc.getDefaultLayerId()

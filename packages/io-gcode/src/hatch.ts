@@ -5,11 +5,16 @@ export interface HatchSegment {
   b: Vec2
 }
 
-/** Axis-aligned hatch (angle 0 = horizontal). Alternating direction per row. */
+/**
+ * Scanline hatch for a closed ring (optional holes).
+ * Angle 0 = horizontal in document space; rows alternate direction (serpentine).
+ * Holes use even-odd pairing so fill skips interiors.
+ */
 export function hatchPolygon(
   ring: readonly Vec2[],
   spacing: number,
   angleRad = 0,
+  holes: readonly (readonly Vec2[])[] = [],
 ): HatchSegment[] {
   if (ring.length < 3 || !(spacing > 0)) return []
   const cos = Math.cos(-angleRad)
@@ -20,12 +25,17 @@ export function hatchPolygon(
     y: -p.x * sin + p.y * cos,
   })
 
-  const local = ring.map(rot)
+  const localOuter = ring.map(rot)
+  const localHoles = holes
+    .filter((h) => h.length >= 3)
+    .map((h) => h.map(rot))
+  const rings = [localOuter, ...localHoles]
+
   let minY = Infinity
   let maxY = -Infinity
   let minX = Infinity
   let maxX = -Infinity
-  for (const p of local) {
+  for (const p of localOuter) {
     minY = Math.min(minY, p.y)
     maxY = Math.max(maxY, p.y)
     minX = Math.min(minX, p.x)
@@ -37,8 +47,10 @@ export function hatchPolygon(
   let row = 0
   const y0 = minY + spacing * 0.5
   for (let y = y0; y <= maxY - spacing * 0.25; y += spacing, row++) {
-    const xs = intersectHorizontal(local, y)
+    const xs: number[] = []
+    for (const r of rings) xs.push(...intersectHorizontal(r, y))
     xs.sort((a, b) => a - b)
+    // Even-odd: (0,1), (2,3), … skips hole interiors when hole edges are included.
     for (let i = 0; i + 1 < xs.length; i += 2) {
       const x0 = xs[i]!
       const x1 = xs[i + 1]!
@@ -62,6 +74,7 @@ function intersectHorizontal(ring: readonly Vec2[], y: number): number[] {
     if (Math.abs(y1 - y0) < 1e-12) continue
     const min = Math.min(y0, y1)
     const max = Math.max(y0, y1)
+    // Half-open [min, max) avoids double-counting vertices.
     if (y < min || y >= max) continue
     const t = (y - y0) / (y1 - y0)
     xs.push(p.x + t * (q.x - p.x))

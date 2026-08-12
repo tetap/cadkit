@@ -14,7 +14,7 @@ import {
 import type { Entity, EntityId, LayerId, Vec2 } from '@cadkit/types'
 import { emptyAABB, expandAABB, isValidAABB } from '@cadkit/types'
 import { hatchPolygon, type HatchSegment } from './hatch.js'
-import { optimizePathOrder } from './optimize-order.js'
+import { chainHatchPaths, optimizePathOrder } from './optimize-order.js'
 
 export interface GcodeExportOptions {
   /** Travel (laser off) feed mm/min. Default 3000. */
@@ -184,19 +184,26 @@ export function buildToolpaths(
   ): Vec2 {
     if (gcode.mode === 'image') return start
     const raw = collectCadPaths(ents, gcode, lookup)
-    // Fill hatch: allow chaining across ~1.25× spacing (serpentine row ends).
+    // Fill: keep scanline order + adjacent serpentine joins only.
+    // NN / 2-opt scramble hatch rows into random jumps.
     const chainTol =
       gcode.mode === 'fill' ? Math.max(0.05, gcode.lineSpacing * 1.25) : 0.05
-    const ordered = doOptimize
-      ? optimizePathOrder(raw, { start, chainTolerance: chainTol })
-      : raw
+    const ordered =
+      gcode.mode === 'fill'
+        ? doOptimize
+          ? chainHatchPaths(raw, chainTol)
+          : raw
+        : doOptimize
+          ? optimizePathOrder(raw, { start, chainTolerance: chainTol })
+          : raw
     let end = start
     for (let pass = 0; pass < gcode.passes; pass++) {
-      // Re-orient each pass from the current tool position.
       const passPaths =
-        doOptimize && pass > 0
-          ? optimizePathOrder(ordered, { start: end, chainTolerance: chainTol })
-          : ordered
+        gcode.mode === 'fill'
+          ? ordered
+          : doOptimize && pass > 0
+            ? optimizePathOrder(ordered, { start: end, chainTolerance: chainTol })
+            : ordered
       for (const pts of passPaths) {
         if (pts.length < 2) continue
         const length = pathLength(pts)
@@ -245,28 +252,32 @@ function collectCadPaths(
         if (pts.length >= 2) out.push(pts)
         continue
       }
-      pushFillRing(out, dedupe(c.points), gcode)
-      for (const hole of c.holes ?? []) {
-        const h = closedRing({ points: hole, closed: true })
-        if (h.length >= 2) out.push(h)
-      }
+      const holes = (c.holes ?? [])
+        .map((h) => dedupe(h))
+        .filter((h) => h.length >= 3)
+      pushFillRing(out, dedupe(c.points), gcode, holes)
     }
   }
   return out
 }
 
-function pushFillRing(out: Vec2[][], ring: Vec2[], gcode: LayerGcodeParams): void {
+function pushFillRing(
+  out: Vec2[][],
+  ring: Vec2[],
+  gcode: LayerGcodeParams,
+  holes: readonly Vec2[][] = [],
+): void {
   if (ring.length < 3) return
   const spacing = gcode.lineSpacing
   const angleRad = ((gcode.fillAngle ?? 0) * Math.PI) / 180
   const segs: HatchSegment[] = []
   if (gcode.fillStyle === 'crossHatch') {
-    // Primary direction + orthogonal pass → rotatable cross / grid fill.
-    segs.push(...hatchPolygon(ring, spacing, angleRad))
-    segs.push(...hatchPolygon(ring, spacing, angleRad + Math.PI / 2))
+    // Full primary pass, then orthogonal — do not interleave / reorder.
+    segs.push(...hatchPolygon(ring, spacing, angleRad, holes))
+    segs.push(...hatchPolygon(ring, spacing, angleRad + Math.PI / 2, holes))
   } else {
     // bidirectional: hatchPolygon already alternates row direction.
-    segs.push(...hatchPolygon(ring, spacing, angleRad))
+    segs.push(...hatchPolygon(ring, spacing, angleRad, holes))
   }
   for (const s of segs) out.push([s.a, s.b])
 }
