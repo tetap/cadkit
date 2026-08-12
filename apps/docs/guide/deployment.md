@@ -7,7 +7,8 @@
 - 地址：<https://tetap.github.io/cadkit/>
 - 构建时 `VITE_BASE=/cadkit/`（见 `apps/playground/vite.config.ts`）
 
-首次启用：仓库 **Settings → Pages → Build and deployment → Source** 选 **GitHub Actions**。
+首次部署会通过 `actions/configure-pages`（`enablement: true`）自动启用 Pages。  
+若仍报 `HttpError: Not Found`，请手动打开仓库 **Settings → Pages → Build and deployment → Source**，选 **GitHub Actions**，再 **Re-run** 失败的 workflow。
 
 本地预览 Pages 产物：
 

@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Prefer Node 24 for JS actions (Node 20 is deprecated on GitHub runners).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
   pages: write
@@ -26,13 +30,20 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - run: pnpm install
 
       # Workspace packages emit dist/ that some consumers resolve; build the graph first.
       - run: pnpm build
+
+      # Creates / enables the Pages site with "GitHub Actions" as source when missing.
+      # Without this, deploy-pages returns HttpError: Not Found.
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Build playground for GitHub Pages
         env:
@@ -46,6 +57,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

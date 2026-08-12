@@ -7,7 +7,8 @@ Pushes to `main` trigger [Deploy Playground](https://github.com/tetap/cadkit/act
 - URL: <https://tetap.github.io/cadkit/>
 - Build uses `VITE_BASE=/cadkit/` (`apps/playground/vite.config.ts`)
 
-First-time setup: repo **Settings → Pages → Build and deployment → Source** = **GitHub Actions**.
+The workflow enables Pages via `actions/configure-pages` (`enablement: true`).  
+If deploy still fails with `HttpError: Not Found`, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**, then re-run the failed workflow.
 
 Local preview of the Pages build:
 
