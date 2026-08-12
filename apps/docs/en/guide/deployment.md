@@ -2,15 +2,23 @@
 
 ## GitHub Pages (Playground)
 
-Pushes to `main` trigger [Deploy Playground](https://github.com/tetap/cadkit/actions/workflows/deploy-playground.yml):
+Pushes to `main` trigger [Deploy Playground](https://github.com/tetap/cadkit/actions/workflows/deploy-playground.yml), which publishes to the **`gh-pages`** branch.
 
 - URL: <https://tetap.github.io/cadkit/>
 - Build uses `VITE_BASE=/cadkit/` (`apps/playground/vite.config.ts`)
 
-The workflow enables Pages via `actions/configure-pages` (`enablement: true`).  
-If deploy still fails with `HttpError: Not Found`, set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**, then re-run the failed workflow.
+### Enable Pages (Settings → Pages)
 
-Local preview of the Pages build:
+| Field | Value |
+|-------|--------|
+| **Source** | **Deploy from a branch** |
+| **Branch** | **`gh-pages`** |
+| **Folder** | **/ (root)** |
+
+Click **Save**.  
+If `gh-pages` is missing from the dropdown, wait for **Deploy Playground** to finish once (it creates the branch), then refresh the Pages settings page.
+
+Local preview:
 
 ```bash
 pnpm --filter @cadkit/playground build:pages

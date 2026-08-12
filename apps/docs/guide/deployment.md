@@ -2,13 +2,23 @@
 
 ## GitHub Pages（Playground）
 
-`main` 推送后由 [Deploy Playground](https://github.com/tetap/cadkit/actions/workflows/deploy-playground.yml) 自动构建并发布：
+`main` 推送后由 [Deploy Playground](https://github.com/tetap/cadkit/actions/workflows/deploy-playground.yml) 构建，并推到 **`gh-pages`** 分支。
 
 - 地址：<https://tetap.github.io/cadkit/>
 - 构建时 `VITE_BASE=/cadkit/`（见 `apps/playground/vite.config.ts`）
 
-首次部署会通过 `actions/configure-pages`（`enablement: true`）自动启用 Pages。  
-若仍报 `HttpError: Not Found`，请手动打开仓库 **Settings → Pages → Build and deployment → Source**，选 **GitHub Actions**，再 **Re-run** 失败的 workflow。
+### 如何启用（Settings → Pages）
+
+在仓库打开：`Settings` → `Pages`，按下面选：
+
+| 项 | 选择 |
+|----|------|
+| **Source** | **Deploy from a branch** |
+| **Branch** | **`gh-pages`** |
+| **Folder** | **/ (root)** |
+
+点 **Save**。  
+若下拉里还没有 `gh-pages`：先等 Actions 里 **Deploy Playground** 跑成功一次（会自动创建该分支），再刷新 Pages 设置页。
 
 本地预览 Pages 产物：
 
