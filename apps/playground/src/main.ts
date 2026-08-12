@@ -61,8 +61,22 @@ async function boot(): Promise<void> {
   bindEditorEvents(editor, store, canvasHost)
 
   const dev = mountDevModal(devModal, devBody, editor, store)
-  const gcodePreview = mountGcodePreview(canvasHost, editor, store)
+  const previewBtn = document.querySelector<HTMLButtonElement>('#btn-preview-gcode')!
+  let syncPreviewBtn = () => {}
+  const gcodePreview = mountGcodePreview(editor, store, {
+    onOpenChange: () => syncPreviewBtn(),
+  })
+  syncPreviewBtn = () => {
+    const on = gcodePreview.isOpen()
+    previewBtn.setAttribute('aria-pressed', String(on))
+    previewBtn.textContent = on ? t('gcodePreviewOn') : t('gcodePreview')
+    previewBtn.classList.toggle('border-brand-dark', on)
+    previewBtn.classList.toggle('bg-brand/25', on)
+  }
   let closeSettings: (() => void) | null = null
+
+  syncPreviewBtn()
+  previewBtn.addEventListener('click', () => gcodePreview.toggle())
 
   mountToolRail(toolRailEl, editor, store, {
     openDev: () => dev.open(),
@@ -96,6 +110,7 @@ async function boot(): Promise<void> {
   onLocaleChange(() => {
     document.title = t('appTitle')
     store.set({ localeTick: store.get().localeTick + 1, status: t('ready') })
+    syncPreviewBtn()
   })
 }
 

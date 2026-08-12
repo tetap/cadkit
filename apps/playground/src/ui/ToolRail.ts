@@ -112,7 +112,7 @@ export function mountToolRail(
     }).join('')
 
     el.innerHTML = `
-      <div class="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto px-2 py-3">
+      <div class="no-scrollbar flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto px-2 py-3">
         <button
           type="button"
           id="rail-app-menu"

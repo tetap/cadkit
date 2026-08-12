@@ -101,7 +101,7 @@ export function mountLayersPanel(
           </div>
         </header>
         <p class="shrink-0 px-3 pb-1 text-[10px] leading-snug text-muted">${t('layersHint')}</p>
-        <div class="min-h-0 flex-1 overflow-y-auto px-2 py-1">
+        <div class="no-scrollbar min-h-0 flex-1 overflow-y-auto px-2 py-1">
           <ul class="space-y-1" role="tree" aria-label="${t('layers')}" id="ly-list">
             ${layers
               .map((layer) =>

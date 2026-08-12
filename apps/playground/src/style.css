@@ -49,6 +49,17 @@
   @apply relative min-h-0 flex-1 overflow-hidden bg-canvas-out;
 }
 
+/* Left docks: keep scroll if needed, never show a scrollbar chrome. */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* Never force size on every canvas — ruler canvases share this host. */
 #canvas-host > #view {
   display: block;

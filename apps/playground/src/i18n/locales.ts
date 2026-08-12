@@ -77,6 +77,11 @@ export type MessageKey =
   | 'gcodePreview'
   | 'gcodePreviewOn'
   | 'gcodePaths'
+  | 'gcodePreviewFit'
+  | 'gcodePreviewProgress'
+  | 'gcodeLegendCut'
+  | 'gcodeLegendTravel'
+  | 'gcodePreviewNavHint'
   | 'sideSlotHint'
   | 'offset'
   | 'offsetDirection'
@@ -332,6 +337,11 @@ const zh: Record<MessageKey, string> = {
   gcodePreview: '预览 G-code',
   gcodePreviewOn: 'G-code 预览中',
   gcodePaths: '段',
+  gcodePreviewFit: '适应画布',
+  gcodePreviewProgress: '加工进度',
+  gcodeLegendCut: '切削',
+  gcodeLegendTravel: '空走',
+  gcodePreviewNavHint: '拖拽平移 · 滚轮缩放 · 双击适应',
   sideSlotHint: '侧栏预留区域',
   offset: '偏移',
   offsetDirection: '方向',
@@ -589,6 +599,11 @@ const en: Record<MessageKey, string> = {
   gcodePreview: 'Preview G-code',
   gcodePreviewOn: 'G-code preview',
   gcodePaths: 'paths',
+  gcodePreviewFit: 'Fit',
+  gcodePreviewProgress: 'Progress',
+  gcodeLegendCut: 'Cut',
+  gcodeLegendTravel: 'Travel',
+  gcodePreviewNavHint: 'Drag pan · wheel zoom · double-click fit',
   sideSlotHint: 'Reserved side panel',
   offset: 'Offset',
   offsetDirection: 'Direction',
