@@ -87,7 +87,7 @@ Playground 支持拖入 / 打开 `.nc` · `.gcode` · `.ngc`。
 |----------|------|
 | `line` | 描边轮廓 |
 | `fill` | 填充扫描线（双向 / 交叉） |
-| `image` | **跳过**（不参与刀路） |
+| `image` | 灰度 PWM 扫描雕刻（按像素深浅调 `S`） |
 
 图层参数（`Layer.gcode`）：
 
@@ -125,7 +125,7 @@ await editor.import.image('https://…')   // URL / data URL
 - `@cadkit/assets`：`AssetRegistry` 负责解码（`createImageBitmap`）、引用计数、GPU 纹理 LRU
 - `ImageEntity.assetId` 稳定引用；序列化保留 `href`，不依赖临时 blob URL
 - 导入图片会创建或复用 **图像图层**（`gcode.mode === 'image'`），不抢占当前矢量活动层
-- 图像层与线 / 填充层 **禁止互拖实体**；G-code 导出跳过图像层与图像实体
+- 图像层与线 / 填充层 **禁止互拖实体**；导出时按灰度 PWM 扫描线雕刻（`lineSpacing` 控制间距）
 - Playground：AppBar 导入、工具栏 Image、画布拖放
 
 ---

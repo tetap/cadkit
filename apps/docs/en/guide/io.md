@@ -86,7 +86,7 @@ Reads **per-layer** machine params, builds a toolpath plan, then emits GRBL:
 |------------|----------|
 | `line` | Stroke outlines |
 | `fill` | Hatch scanlines (bidirectional / cross-hatch) |
-| `image` | **Skipped** (not part of the toolpath) |
+| `image` | Grayscale PWM scan engraving (S follows pixel tone) |
 
 Layer params (`Layer.gcode`):
 
@@ -124,7 +124,7 @@ await editor.import.image('https://…')   // URL / data URL
 - `@cadkit/assets`: `AssetRegistry` decodes (`createImageBitmap`), ref-counts, and budgets GPU textures
 - `ImageEntity.assetId` is the stable reference; serialization keeps `href`
 - Imports create or reuse an **image layer** (`gcode.mode === 'image'`) without stealing the active vector layer
-- Entities cannot be dragged between image and line/fill layers; G-code export skips image layers / entities
+- Entities cannot be dragged between image and line/fill layers; export uses grayscale PWM scanlines (`lineSpacing` sets pitch)
 - Playground: AppBar import, Image tool, canvas drag-and-drop
 
 ---

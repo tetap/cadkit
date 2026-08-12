@@ -96,12 +96,7 @@ import {
   type ToolName,
 } from '@cadkit/interaction'
 import { ImeTextEditor } from '@cadkit/text'
-import {
-  AssetRegistry,
-  applyFloydSteinbergRgba,
-  createFilterId,
-  type FilterOp,
-} from '@cadkit/assets'
+import { AssetRegistry, createFilterId, type FilterOp } from '@cadkit/assets'
 import { parseSvg, exportSvgDocument } from '@cadkit/io-svg'
 import { importDxf } from '@cadkit/io-dxf'
 import {
@@ -404,13 +399,14 @@ export class Editor {
   }
 
   /**
-   * Sample visible image entities into Floyd-dithered luma grids for raster engraving.
+   * Sample visible image entities into continuous luma grids for PWM engraving.
    * Resolution follows the image layer's `lineSpacing` (scanline pitch in mm).
    */
   private async prepareImageRasters(): Promise<Map<EntityId, ImageRasterSample>> {
     const out = new Map<EntityId, ImageRasterSample>()
     const lookup = (id: EntityId) => this.document.getEntity(id)
-    const maxDim = 2048
+    // Cap keeps G-code size bounded; 4096² ≈ fine photo at ~0.05–0.1 mm pitch on A5.
+    const maxDim = 4096
 
     for (const e of this.document.getEntities()) {
       if (e.type !== 'image' || e.style.visible === false) continue
@@ -432,11 +428,7 @@ export class Editor {
       }
 
       const rgba = await sampleBitmapRgba(bitmap, cols, rows)
-      applyFloydSteinbergRgba(rgba, cols, rows, { levels: 2 })
-      const luma = new Uint8Array(cols * rows)
-      for (let i = 0; i < luma.length; i++) {
-        luma[i] = rgba[i * 4]!
-      }
+      const luma = rgbaToLuma(rgba, cols, rows)
 
       const world = resolveWorldMatrix(e, lookup)
       out.set(e.id, {
@@ -446,7 +438,7 @@ export class Editor {
         cols,
         rows,
         luma,
-        burnMax: 127,
+        engraveMode: 'grayscale',
         localToWorld: (p: { x: number; y: number }) => transformPoint(world, p),
       })
     }
@@ -757,7 +749,14 @@ export class Editor {
     const activeId = this.document.getDefaultLayerId()
     const layer = this.document.addLayer({ name: 'Image', color: '#64748b' })
     this.document.updateLayer(layer.id, {
-      gcode: { ...DEFAULT_LAYER_GCODE, mode: 'image' },
+      gcode: {
+        ...DEFAULT_LAYER_GCODE,
+        mode: 'image',
+        // Denser scan + moderate feed for grayscale photo engraving.
+        lineSpacing: 0.08,
+        power: 800,
+        speed: 1800,
+      },
     })
     // Keep the previous active layer so drawing tools stay on vector layers.
     this.document.setDefaultLayerId(activeId)
@@ -2282,7 +2281,7 @@ export class Editor {
   }
 }
 
-/** Draw bitmap into a cols×rows canvas and return RGBA (for dither → G-code). */
+/** Draw bitmap into a cols×rows canvas and return RGBA (for grayscale PWM G-code). */
 async function sampleBitmapRgba(
   bitmap: ImageBitmap,
   cols: number,
@@ -2290,11 +2289,14 @@ async function sampleBitmapRgba(
 ): Promise<Uint8ClampedArray> {
   const w = Math.max(1, cols)
   const h = Math.max(1, rows)
+  // High-quality downsample when shrinking; nearest when enlarging (avoid soft mush).
+  const shrink = w < bitmap.width || h < bitmap.height
   if (typeof OffscreenCanvas !== 'undefined') {
     const canvas = new OffscreenCanvas(w, h)
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) throw new Error('OffscreenCanvas 2d unavailable')
-    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingEnabled = shrink
+    if (shrink) ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(bitmap, 0, 0, w, h)
     return ctx.getImageData(0, 0, w, h).data
   }
@@ -2303,9 +2305,38 @@ async function sampleBitmapRgba(
   canvas.height = h
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) throw new Error('canvas 2d unavailable')
-  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingEnabled = shrink
+  if (shrink) ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(bitmap, 0, 0, w, h)
   return ctx.getImageData(0, 0, w, h).data
+}
+
+/** Rec.709 luma + mild contrast stretch so photos keep punch after PWM mapping. */
+function rgbaToLuma(rgba: Uint8ClampedArray, cols: number, rows: number): Uint8Array {
+  const n = cols * rows
+  const luma = new Uint8Array(n)
+  let min = 255
+  let max = 0
+  for (let i = 0; i < n; i++) {
+    const o = i * 4
+    const a = rgba[o + 3]! / 255
+    // Transparent → treat as white (no burn).
+    const y =
+      a < 0.02
+        ? 255
+        : Math.round(0.2126 * rgba[o]! + 0.7152 * rgba[o + 1]! + 0.0722 * rgba[o + 2]!)
+    luma[i] = y
+    if (y < min) min = y
+    if (y > max) max = y
+  }
+  // Stretch only when the image has usable range (avoid amplifying flat fills).
+  if (max - min >= 16) {
+    const scale = 255 / (max - min)
+    for (let i = 0; i < n; i++) {
+      luma[i] = Math.round((luma[i]! - min) * scale)
+    }
+  }
+  return luma
 }
 
 /**

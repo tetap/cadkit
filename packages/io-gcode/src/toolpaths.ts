@@ -15,7 +15,11 @@ import type { Entity, EntityId, LayerId, Vec2 } from '@cadkit/types'
 import { emptyAABB, expandAABB, isValidAABB } from '@cadkit/types'
 import { hatchPolygon, type HatchSegment } from './hatch.js'
 import { chainHatchPaths, optimizePathOrder } from './optimize-order.js'
-import { rasterToCutPaths, type ImageRasterSample } from './raster.js'
+import {
+  rasterToCutPaths,
+  rasterToPowerCuts,
+  type ImageRasterSample,
+} from './raster.js'
 
 export interface GcodeExportOptions {
   /** Travel (laser off) feed mm/min. Default 3000. */
@@ -217,15 +221,36 @@ export function buildToolpaths(
     }
 
     if (images.length && rasters) {
-      const rasterPaths: Vec2[][] = []
       for (const img of images) {
         const sample = rasters.get(img.id)
         if (!sample) continue
-        rasterPaths.push(...rasterToCutPaths(sample))
+        const mode = sample.engraveMode ?? 'grayscale'
+        if (mode === 'dither') {
+          const paths = rasterToCutPaths(sample)
+          const chainTol = Math.max(0.05, gcode.lineSpacing * 1.25)
+          const ordered = doOptimize ? chainHatchPaths(paths, chainTol) : paths
+          end = pushPasses(ordered, gcode, layer, end, true)
+          continue
+        }
+        // Grayscale PWM: keep serpentine order; each segment has its own S.
+        const segs = rasterToPowerCuts(sample, { maxPower: gcode.power })
+        for (let pass = 0; pass < gcode.passes; pass++) {
+          for (const seg of segs) {
+            if (seg.points.length < 2 || seg.power <= 0) continue
+            const length = pathLength(seg.points)
+            if (length < 1e-9) continue
+            cuts.push({
+              points: seg.points,
+              layerId: layer.id,
+              layerName: layer.name,
+              feed: gcode.speed,
+              power: seg.power,
+              length,
+            })
+            end = seg.points[seg.points.length - 1]!
+          }
+        }
       }
-      const chainTol = Math.max(0.05, gcode.lineSpacing * 1.25)
-      const ordered = doOptimize ? chainHatchPaths(rasterPaths, chainTol) : rasterPaths
-      end = pushPasses(ordered, gcode, layer, end, true)
     }
 
     return end
