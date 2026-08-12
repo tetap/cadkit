@@ -225,15 +225,14 @@ export function buildToolpaths(
         const sample = rasters.get(img.id)
         if (!sample) continue
         const mode = sample.engraveMode ?? 'grayscale'
-        if (mode === 'dither') {
-          const paths = rasterToCutPaths(sample)
-          const chainTol = Math.max(0.05, gcode.lineSpacing * 1.25)
-          const ordered = doOptimize ? chainHatchPaths(paths, chainTol) : paths
-          end = pushPasses(ordered, gcode, layer, end, true)
-          continue
-        }
-        // Grayscale PWM: serpentine order; S varies (0 = no burn, still G1 — not travel).
-        const segs = rasterToPowerCuts(sample, { maxPower: gcode.power })
+        // Binary (threshold / Floyd): only S=max and S=0 — continuous scan, not grey PWM.
+        // Photo greyscale: full tone curve. Transparent pixels still open travel gaps.
+        const segs = rasterToPowerCuts(sample, {
+          maxPower: gcode.power,
+          gamma: 1,
+          minPower: 0,
+          powerLevels: mode === 'dither' ? 2 : 64,
+        })
         for (let pass = 0; pass < gcode.passes; pass++) {
           for (const seg of segs) {
             if (seg.points.length < 2 || seg.power < 0) continue

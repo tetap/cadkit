@@ -88,6 +88,25 @@ describe('rasterToPowerCuts', () => {
     expect(cuts[1]!.points[0]!.x).toBeGreaterThanOrEqual(3 - 1e-6)
   })
 
+  it('binary (2 levels) only emits S=max and S=0', () => {
+    const luma = new Uint8Array([0, 0, 255, 255, 128, 200])
+    const cuts = rasterToPowerCuts(
+      {
+        origin: { x: 0, y: 0 },
+        width: 6,
+        height: 1,
+        cols: 6,
+        rows: 1,
+        luma,
+      },
+      { maxPower: 800, gamma: 1, powerLevels: 2, minPower: 0 },
+    )
+    const powers = new Set(cuts.map((c) => c.power))
+    expect([...powers].every((p) => p === 0 || p === 800)).toBe(true)
+    expect(powers.has(800)).toBe(true)
+    expect(powers.has(0)).toBe(true)
+  })
+
   it('merges adjacent equal-power pixels and snakes rows', () => {
     const cols = 4
     const rows = 2

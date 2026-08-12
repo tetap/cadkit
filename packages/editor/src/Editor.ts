@@ -404,8 +404,9 @@ export class Editor {
   }
 
   /**
-   * Sample visible image entities into continuous luma grids for PWM engraving.
-   * Resolution follows the image layer's `lineSpacing` (scanline pitch in mm).
+   * Sample visible image entities into luma grids for PWM / binary engraving.
+   * Filters run at (capped) source resolution — same order as the canvas tone path —
+   * then rescale to scanline pitch. Threshold / Floyd → binary dither toolpaths.
    */
   private async prepareImageRasters(): Promise<Map<EntityId, ImageRasterSample>> {
     const out = new Map<EntityId, ImageRasterSample>()
@@ -432,11 +433,40 @@ export class Editor {
         rows = Math.max(1, Math.round(rows / s))
       }
 
-      const rgba = await sampleBitmapRgba(bitmap, cols, rows)
-      // Match canvas: apply the same filter stack before sampling luma for G-code.
       const filters = (e.filters ?? []) as FilterOp[]
-      if (filters.length) applyFilterStackRgba(rgba, cols, rows, filters)
-      const { luma, alpha } = rgbaToLumaAlpha(rgba, cols, rows)
+      const binaryTone = filters.some(
+        (f) => f.type === 'threshold' || f.type === 'floydSteinberg',
+      )
+
+      // Filter at source (capped) res first — downsampling a photo then thresholding
+      // does not match the canvas binary look and reintroduces mushy greys.
+      let filterW = bitmap.width
+      let filterH = bitmap.height
+      if (filterW > maxDim || filterH > maxDim) {
+        const s = Math.max(filterW / maxDim, filterH / maxDim)
+        filterW = Math.max(1, Math.round(filterW / s))
+        filterH = Math.max(1, Math.round(filterH / s))
+      }
+      let rgba = await sampleBitmapRgba(bitmap, filterW, filterH, {
+        smooth: filterW < bitmap.width || filterH < bitmap.height,
+      })
+      if (filters.length) applyFilterStackRgba(rgba, filterW, filterH, filters)
+      if (filterW !== cols || filterH !== rows) {
+        rgba = resizeRgba(rgba, filterW, filterH, cols, rows, {
+          // Nearest keeps threshold / Floyd edges crisp for G-code.
+          smooth: !binaryTone,
+        })
+      }
+
+      const { luma, alpha } = rgbaToLumaAlpha(rgba, cols, rows, {
+        // Binary tones must stay 0/255 — percentile stretch would invent greys.
+        stretch: !binaryTone,
+      })
+      if (binaryTone) {
+        for (let i = 0; i < luma.length; i++) {
+          luma[i] = luma[i]! < 128 ? 0 : 255
+        }
+      }
 
       const world = resolveWorldMatrix(e, lookup)
       out.set(e.id, {
@@ -447,7 +477,9 @@ export class Editor {
         rows,
         luma,
         alpha,
-        engraveMode: 'grayscale',
+        // 'dither' here means binary tone (threshold / Floyd) — toolpaths use 2-level PWM.
+        engraveMode: binaryTone ? 'dither' : 'grayscale',
+        burnMax: 127,
         localToWorld: (p: { x: number; y: number }) => transformPoint(world, p),
       })
     }
@@ -2290,22 +2322,22 @@ export class Editor {
   }
 }
 
-/** Draw bitmap into a cols×rows canvas and return RGBA (for grayscale PWM G-code). */
+/** Draw bitmap into a cols×rows canvas and return RGBA. */
 async function sampleBitmapRgba(
   bitmap: ImageBitmap,
   cols: number,
   rows: number,
+  opts?: { smooth?: boolean },
 ): Promise<Uint8ClampedArray> {
   const w = Math.max(1, cols)
   const h = Math.max(1, rows)
-  // High-quality downsample when shrinking; nearest when enlarging (avoid soft mush).
-  const shrink = w < bitmap.width || h < bitmap.height
+  const smooth = opts?.smooth ?? (w < bitmap.width || h < bitmap.height)
   if (typeof OffscreenCanvas !== 'undefined') {
     const canvas = new OffscreenCanvas(w, h)
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) throw new Error('OffscreenCanvas 2d unavailable')
-    ctx.imageSmoothingEnabled = shrink
-    if (shrink) ctx.imageSmoothingQuality = 'high'
+    ctx.imageSmoothingEnabled = smooth
+    if (smooth) ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(bitmap, 0, 0, w, h)
     return ctx.getImageData(0, 0, w, h).data
   }
@@ -2314,10 +2346,55 @@ async function sampleBitmapRgba(
   canvas.height = h
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) throw new Error('canvas 2d unavailable')
-  ctx.imageSmoothingEnabled = shrink
-  if (shrink) ctx.imageSmoothingQuality = 'high'
+  ctx.imageSmoothingEnabled = smooth
+  if (smooth) ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(bitmap, 0, 0, w, h)
   return ctx.getImageData(0, 0, w, h).data
+}
+
+/** Resample an RGBA buffer to a new size (canvas drawImage). */
+function resizeRgba(
+  src: Uint8ClampedArray,
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number,
+  opts?: { smooth?: boolean },
+): Uint8ClampedArray {
+  const w = Math.max(1, dstW)
+  const h = Math.max(1, dstH)
+  const smooth = opts?.smooth ?? true
+  const paint = (canvas: OffscreenCanvas | HTMLCanvasElement, ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) => {
+    const srcCanvas =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(srcW, srcH)
+        : Object.assign(document.createElement('canvas'), { width: srcW, height: srcH })
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true }) as
+      | CanvasRenderingContext2D
+      | OffscreenCanvasRenderingContext2D
+      | null
+    if (!srcCtx) throw new Error('canvas 2d unavailable')
+    const img = srcCtx.createImageData(srcW, srcH)
+    img.data.set(src)
+    srcCtx.putImageData(img, 0, 0)
+    ctx.imageSmoothingEnabled = smooth
+    if (smooth && 'imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high'
+    ctx.clearRect(0, 0, w, h)
+    ctx.drawImage(srcCanvas as CanvasImageSource, 0, 0, w, h)
+    return ctx.getImageData(0, 0, w, h).data
+  }
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const canvas = new OffscreenCanvas(w, h)
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('OffscreenCanvas 2d unavailable')
+    return paint(canvas, ctx)
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) throw new Error('canvas 2d unavailable')
+  return paint(canvas, ctx)
 }
 
 /**
@@ -2328,6 +2405,7 @@ function rgbaToLumaAlpha(
   rgba: Uint8ClampedArray,
   cols: number,
   rows: number,
+  opts?: { stretch?: boolean },
 ): { luma: Uint8Array; alpha: Uint8Array } {
   const n = cols * rows
   const luma = new Uint8Array(n)
@@ -2345,7 +2423,7 @@ function rgbaToLumaAlpha(
       opaqueCount++
     }
   }
-  if (opaqueCount < 16) return { luma, alpha }
+  if (opts?.stretch === false || opaqueCount < 16) return { luma, alpha }
   const loTarget = Math.max(1, Math.floor(opaqueCount * 0.02))
   const hiTarget = Math.max(loTarget + 1, Math.ceil(opaqueCount * 0.98))
   let acc = 0
