@@ -15,8 +15,8 @@ export function isClosedRing(kind: RenderItem['kind'], coords: ArrayLike<number>
 }
 
 /**
- * Fan-triangulate a closed ring into colored triangle-list vertices (x,y,r,g,b,a).
- * Suitable for convex shapes (rect / ellipse / circle). Concave polygons may show artifacts.
+ * Triangulate a closed ring into colored triangle-list vertices (x,y,r,g,b,a).
+ * Uses a centroid fan so star-shaped concave polygons (stars / hearts) fill correctly.
  */
 export function packEntityFillVertices(items: readonly RenderItem[]): {
   vertexData: Float32Array
@@ -28,7 +28,7 @@ export function packEntityFillVertices(items: readonly RenderItem[]): {
     if (!isPaintVisible(item.fill)) continue
     if (!isClosedRing(item.kind, item.coords)) continue
     const n = uniqueRingCount(item.coords)
-    if (n >= 3) tris += n - 2
+    if (n >= 3) tris += n
   }
   const floats = Math.max(tris * 3 * 6, 6)
   const data = new Float32Array(floats)
@@ -40,27 +40,30 @@ export function packEntityFillVertices(items: readonly RenderItem[]): {
     const c = item.coords
     const n = uniqueRingCount(c)
     if (n < 3) continue
-    const x0 = c[0]!
-    const y0 = c[1]!
-    for (let i = 1; i + 1 < n; i++) {
-      const x1 = c[i * 2]!
-      const y1 = c[i * 2 + 1]!
-      const x2 = c[(i + 1) * 2]!
-      const y2 = c[(i + 1) * 2 + 1]!
-      data[o++] = x0
-      data[o++] = y0
+    let cx = 0
+    let cy = 0
+    for (let i = 0; i < n; i++) {
+      cx += c[i * 2]!
+      cy += c[i * 2 + 1]!
+    }
+    cx /= n
+    cy /= n
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n
+      data[o++] = cx
+      data[o++] = cy
       data[o++] = r
       data[o++] = g
       data[o++] = b
       data[o++] = a
-      data[o++] = x1
-      data[o++] = y1
+      data[o++] = c[i * 2]!
+      data[o++] = c[i * 2 + 1]!
       data[o++] = r
       data[o++] = g
       data[o++] = b
       data[o++] = a
-      data[o++] = x2
-      data[o++] = y2
+      data[o++] = c[j * 2]!
+      data[o++] = c[j * 2 + 1]!
       data[o++] = r
       data[o++] = g
       data[o++] = b

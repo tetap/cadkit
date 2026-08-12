@@ -143,16 +143,35 @@ export function buildsHandlesForEntity(
       },
     )
   } else if (entity.type === 'circle') {
-    // Figma-like: full circle exposes a single Arc opener on the east rim.
     const arcGuide = {
       center: toWorldPoint(m, entity.center),
       rim: toWorldPoint(m, rimPoint(entity.center, entity.radius, 0)),
     }
     handles.push({
+      id: `${entity.id}:center`,
+      entityId: entity.id,
+      kind: 'center',
+      world: toWorldPoint(m, entity.center),
+      cursor: 'move',
+      appearance: 'shape-param',
+      arcGuide,
+    })
+    // East rim: resize radius (primary).
+    handles.push({
+      id: `${entity.id}:radius`,
+      entityId: entity.id,
+      kind: 'radius',
+      world: toWorldPoint(m, rimPoint(entity.center, entity.radius, 0)),
+      cursor: 'ew-resize',
+      appearance: 'shape-param',
+      arcGuide,
+    })
+    // North rim: open into an arc (away from the radius handle).
+    handles.push({
       id: `${entity.id}:arc-open`,
       entityId: entity.id,
       kind: 'angle',
-      world: toWorldPoint(m, rimPoint(entity.center, entity.radius, 0)),
+      world: toWorldPoint(m, rimPoint(entity.center, entity.radius, -Math.PI / 2)),
       cursor: 'crosshair',
       appearance: 'shape-param',
       label: 'Arc',

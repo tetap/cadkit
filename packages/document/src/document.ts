@@ -121,7 +121,7 @@ export interface Layer {
   color?: string
   /**
    * Engraver / G-code params. `mode` also controls canvas paint:
-   * line → stroke only; fill → fill only.
+   * line → stroke only; fill → fill + stroke (open paths stay visible).
    */
   gcode?: LayerGcodeParams
 }
@@ -135,8 +135,11 @@ export interface LayerAwarePaint {
 /**
  * Resolve entity stroke/fill for display, honoring the layer engraver mode:
  * - `line`: keep stroke, drop fill
- * - `fill`: keep/create fill, drop stroke
+ * - `fill`: ensure a solid fill, **keep stroke** so open paths / text holes stay visible
  * - `image`: leave style as-is (rasters are not recolored by engraver mode)
+ *
+ * Canvas paint is not identical to G-code strategy: fill mode must not hide
+ * strokes, or pen/polyline/bezier confirmations look blank.
  */
 export function resolveLayerAwarePaint(
   layer: Layer | undefined | null,
@@ -163,9 +166,9 @@ export function resolveLayerAwarePaint(
     return { stroke, fill: undefined, strokeWidth }
   }
 
-  // Fill mode: ignore stroke; ensure a solid fill from entity fill or stroke/layer tint.
+  // Fill mode: ensure fill from entity/stroke/layer, but keep stroke for outlines.
   const fillColor = hasFill && rawFill ? rawFill : layerFillFromStroke(stroke)
-  return { stroke: 'none', fill: fillColor, strokeWidth }
+  return { stroke, fill: fillColor, strokeWidth }
 }
 
 export interface DocumentChange {

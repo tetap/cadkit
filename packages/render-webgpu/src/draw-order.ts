@@ -47,7 +47,8 @@ export function packDrawOrder(
     }
     if (isPaintVisible(item.fill) && isClosedRing(item.kind, item.coords)) {
       const n = uniqueRingCount(item.coords)
-      if (n >= 3) fillTris += n - 2
+      // Centroid fan: one triangle per edge (works for star-shaped concave rings).
+      if (n >= 3) fillTris += n
     }
     if (isPaintVisible(item.stroke)) {
       if (item.kind === 'line') strokeSegs += 1
@@ -186,15 +187,22 @@ function appendFillFan(data: Float32Array, o: number, item: RenderItem): number 
   const c = item.coords
   const n = uniqueRingCount(c)
   if (n < 3) return o
-  const x0 = c[0]!
-  const y0 = c[1]!
-  for (let i = 1; i + 1 < n; i++) {
+  let cx = 0
+  let cy = 0
+  for (let i = 0; i < n; i++) {
+    cx += c[i * 2]!
+    cy += c[i * 2 + 1]!
+  }
+  cx /= n
+  cy /= n
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n
     const x1 = c[i * 2]!
     const y1 = c[i * 2 + 1]!
-    const x2 = c[(i + 1) * 2]!
-    const y2 = c[(i + 1) * 2 + 1]!
-    data[o++] = x0
-    data[o++] = y0
+    const x2 = c[j * 2]!
+    const y2 = c[j * 2 + 1]!
+    data[o++] = cx
+    data[o++] = cy
     data[o++] = r
     data[o++] = g
     data[o++] = b

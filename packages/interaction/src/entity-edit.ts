@@ -188,7 +188,13 @@ export function handleEditPatch(
     if (handle.id.endsWith(':end')) return { end: { x: local.x, y: local.y } } as Partial<Entity>
   }
   if (entity.type === 'circle') {
+    if (handle.kind === 'center') return { center: { x: local.x, y: local.y } } as Partial<Entity>
+    if (handle.kind === 'radius' || handle.id.endsWith(':radius')) {
+      const r = Math.hypot(local.x - entity.center.x, local.y - entity.center.y)
+      return { radius: Math.max(1e-6, r) } as Partial<Entity>
+    }
     if (handle.id.endsWith(':arc-open')) {
+      // Open from the east rim so the wedge grows from a stable start.
       const start = opts?.arcDrag?.startAngle ?? 0
       let end = Math.atan2(local.y - entity.center.y, local.x - entity.center.x)
       if (sweepAbs(start, end) < 1e-3) end = start + 1e-3

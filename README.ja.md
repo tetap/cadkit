@@ -113,7 +113,7 @@ const editor = await createEditor({ view: canvas, theme: 'light' })
 await editor.import.svg(svgText)
 await editor.import.dxf(dxfFile)
 await editor.import.gcode(gcodeText)
-const nc = editor.export.gcode()
+const nc = await editor.export.gcode()
 ```
 
 ---

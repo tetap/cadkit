@@ -277,4 +277,69 @@ describe('exportGcode', () => {
     expect(opt.cutLength).toBeCloseTo(naive.cutLength, 5)
     expect(optTravel).toBeLessThan(naiveTravel)
   })
+
+  it('includes image raster scanlines when samples are provided', () => {
+    const doc = new CadDocument()
+    const imgLayer = doc.addLayer({ name: 'Image' })
+    doc.updateLayer(imgLayer.id, {
+      gcode: {
+        mode: 'image',
+        lineSpacing: 1,
+        fillStyle: 'bidirectional',
+        fillAngle: 0,
+        power: 600,
+        speed: 1200,
+        passes: 1,
+      },
+    })
+    const id = createEntityId('image')
+    doc.add({
+      id,
+      type: 'image',
+      layerId: imgLayer.id,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      href: 'test.png',
+      width: 4,
+      height: 2,
+      origin: { x: 0, y: 0 },
+    })
+    const luma = new Uint8Array([0, 0, 0, 0, 255, 255, 255, 255])
+    const rasters = new Map([
+      [
+        id,
+        {
+          origin: { x: 0, y: 0 },
+          width: 4,
+          height: 2,
+          cols: 4,
+          rows: 2,
+          luma,
+        },
+      ],
+    ])
+    const plan = buildToolpaths(
+      {
+        entities: doc.getEntities(),
+        layers: doc.getLayers(),
+        getEntity: (eid) => doc.getEntity(eid),
+        imageRasters: rasters,
+      },
+      { flipY: false, optimizeOrder: false },
+    )
+    expect(plan.cuts.length).toBeGreaterThan(0)
+    expect(plan.cutLength).toBeGreaterThan(0)
+    const gcode = exportGcode(
+      {
+        entities: doc.getEntities(),
+        layers: doc.getLayers(),
+        getEntity: (eid) => doc.getEntity(eid),
+        imageRasters: rasters,
+      },
+      { flipY: false, decimals: 1 },
+    )
+    expect(gcode).toContain('M3')
+    expect(gcode).toMatch(/G1 /)
+  })
 })

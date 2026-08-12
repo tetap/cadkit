@@ -292,17 +292,35 @@ export class PolylineTool implements Tool {
   readonly name = 'polyline' as const
   private points: WorldPoint[] = []
 
-  onPointerDown(_s: ScreenPoint, world: WorldPoint, button: number, ctx: ToolContext): void {
+  onPointerDown(screen: ScreenPoint, world: WorldPoint, button: number, ctx: ToolContext): void {
     if (button !== 0) return
     const p = snapWorld(ctx, world)
+    // Close by clicking near the first point (same gesture as PenTool).
+    if (this.points.length >= 3) {
+      const s0 = ctx.camera.worldToScreen(this.points[0]!)
+      if (Math.hypot(s0.x - screen.x, s0.y - screen.y) <= 10) {
+        this.commit(ctx, true)
+        return
+      }
+    }
     this.points.push(p)
-    ctx.onPreview?.({ kind: 'polyline', points: [...this.points] })
+    ctx.onPreview?.({ kind: 'polyline', points: [...this.points], closed: false })
   }
 
-  onPointerMove(_s: ScreenPoint, world: WorldPoint, ctx: ToolContext): void {
+  onPointerMove(screen: ScreenPoint, world: WorldPoint, ctx: ToolContext): void {
     if (!this.points.length) return
     const p = snapWorld(ctx, world)
-    ctx.onPreview?.({ kind: 'polyline', points: [...this.points, p] })
+    const closedHint =
+      this.points.length >= 3 &&
+      (() => {
+        const s0 = ctx.camera.worldToScreen(this.points[0]!)
+        return Math.hypot(s0.x - screen.x, s0.y - screen.y) <= 10
+      })()
+    ctx.onPreview?.({
+      kind: 'polyline',
+      points: closedHint ? [...this.points] : [...this.points, p],
+      closed: closedHint,
+    })
   }
 
   onDoubleClick(_s: ScreenPoint, _w: WorldPoint, ctx: ToolContext): void {

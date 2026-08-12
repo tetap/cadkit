@@ -42,16 +42,20 @@ export function mountGcodePreview(
 
   const rebuild = () => {
     if (!open) return
-    plan = editor.export.toolpaths({ flipY: true })
-    bounds = computeBounds(plan)
-    const cuts = plan.cuts.length
-    const len = plan.cutLength
-    const title = qs<HTMLElement>('[data-gcode-title]')
-    if (title) {
-      title.textContent = `${t('gcodePreview')} · ${cuts} ${t('gcodePaths')} · ${len.toFixed(1)} mm`
-    }
-    fitView()
-    paint()
+    void (async () => {
+      const next = await editor.export.toolpaths({ flipY: true })
+      if (!open) return
+      plan = next
+      bounds = computeBounds(plan)
+      const cuts = plan.cuts.length
+      const len = plan.cutLength
+      const title = qs<HTMLElement>('[data-gcode-title]')
+      if (title) {
+        title.textContent = `${t('gcodePreview')} · ${cuts} ${t('gcodePaths')} · ${len.toFixed(1)} mm`
+      }
+      fitView()
+      paint()
+    })()
   }
 
   const scheduleRebuild = () => {

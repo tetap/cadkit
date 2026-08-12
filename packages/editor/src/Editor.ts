@@ -40,6 +40,7 @@ import {
   resolveWorldMatrix,
   scale as scaleMatrix,
   svgUserUnitsToWorld,
+  transformPoint,
   type BooleanOp,
   type BooleanOptions,
   type LengthUnit as GeomUnit,
@@ -95,15 +96,21 @@ import {
   type ToolName,
 } from '@cadkit/interaction'
 import { ImeTextEditor } from '@cadkit/text'
-import { AssetRegistry, createFilterId, type FilterOp } from '@cadkit/assets'
+import {
+  AssetRegistry,
+  applyFloydSteinbergRgba,
+  createFilterId,
+  type FilterOp,
+} from '@cadkit/assets'
 import { parseSvg, exportSvgDocument } from '@cadkit/io-svg'
 import { importDxf } from '@cadkit/io-dxf'
 import {
   buildToolpaths,
-  exportGcode,
+  emitGrbl,
   importGcode,
   type GcodeExportOptions,
   type GcodeToolpathPlan,
+  type ImageRasterSample,
 } from '@cadkit/io-gcode'
 import { detectCapabilities, ensureEditorHost, resolveView } from '@cadkit/platform-web'
 import { WORKER_ABI } from '@cadkit/worker-runtime'
@@ -141,10 +148,13 @@ export class Editor {
     /** SVG matching canvas paint (world space + layer line/fill mode). */
     svg: () => string
     json: () => string
-    /** GRBL laser G-code using per-layer engraver params. */
-    gcode: (opts?: GcodeExportOptions) => string
+    /**
+     * GRBL laser G-code using per-layer engraver params.
+     * Includes image raster scan engraving (Floyd dither → serpentine burns).
+     */
+    gcode: (opts?: GcodeExportOptions) => Promise<string>
     /** Optimized toolpath plan (CAD space) for preview / scrubbing. */
-    toolpaths: (opts?: GcodeExportOptions) => GcodeToolpathPlan
+    toolpaths: (opts?: GcodeExportOptions) => Promise<GcodeToolpathPlan>
   }
 
   private lifecycle: EditorLifecycle = 'created'
@@ -376,25 +386,71 @@ export class Editor {
           getEntity: (id) => this.document.getEntity(id),
         }),
       json: () => JSON.stringify(this.document.toJSON(), null, 2),
-      gcode: (opts) =>
-        exportGcode(
-          {
-            entities: this.document.getEntities(),
-            layers: this.document.getLayers(),
-            getEntity: (id) => this.document.getEntity(id),
-          },
-          opts,
-        ),
-      toolpaths: (opts) =>
+      gcode: async (opts) => {
+        const plan = await this.export.toolpaths(opts)
+        return emitGrbl(plan)
+      },
+      toolpaths: async (opts) =>
         buildToolpaths(
           {
             entities: this.document.getEntities(),
             layers: this.document.getLayers(),
             getEntity: (id) => this.document.getEntity(id),
+            imageRasters: await this.prepareImageRasters(),
           },
           opts,
         ),
     }
+  }
+
+  /**
+   * Sample visible image entities into Floyd-dithered luma grids for raster engraving.
+   * Resolution follows the image layer's `lineSpacing` (scanline pitch in mm).
+   */
+  private async prepareImageRasters(): Promise<Map<EntityId, ImageRasterSample>> {
+    const out = new Map<EntityId, ImageRasterSample>()
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    const maxDim = 2048
+
+    for (const e of this.document.getEntities()) {
+      if (e.type !== 'image' || e.style.visible === false) continue
+      const layer = this.document.getLayer(e.layerId)
+      if (layer && layer.visible === false) continue
+      const assetId = e.assetId
+      if (!assetId) continue
+      const bitmap = this.assets.get(assetId as never)?.bitmap
+      if (!bitmap) continue
+
+      const g = resolveLayerGcode(layer)
+      const spacing = Math.max(1e-4, g.lineSpacing)
+      let cols = Math.max(1, Math.round(e.width / spacing))
+      let rows = Math.max(1, Math.round(e.height / spacing))
+      if (cols > maxDim || rows > maxDim) {
+        const s = Math.max(cols / maxDim, rows / maxDim)
+        cols = Math.max(1, Math.round(cols / s))
+        rows = Math.max(1, Math.round(rows / s))
+      }
+
+      const rgba = await sampleBitmapRgba(bitmap, cols, rows)
+      applyFloydSteinbergRgba(rgba, cols, rows, { levels: 2 })
+      const luma = new Uint8Array(cols * rows)
+      for (let i = 0; i < luma.length; i++) {
+        luma[i] = rgba[i * 4]!
+      }
+
+      const world = resolveWorldMatrix(e, lookup)
+      out.set(e.id, {
+        origin: { ...e.origin },
+        width: e.width,
+        height: e.height,
+        cols,
+        rows,
+        luma,
+        burnMax: 127,
+        localToWorld: (p: { x: number; y: number }) => transformPoint(world, p),
+      })
+    }
+    return out
   }
 
   static async create(options: CreateEditorOptions = {}): Promise<Editor> {
@@ -542,7 +598,7 @@ export class Editor {
     if (patch.color && patch.color !== prev?.color) {
       this.recolorLayerEntities(id, patch.color)
     }
-    // `gcode.mode` changes canvas paint (line = stroke only / fill = fill only).
+    // `gcode.mode` changes canvas paint (line = stroke only / fill = fill + stroke).
     const modeChanged =
       patch.gcode?.mode !== undefined && patch.gcode.mode !== resolveLayerGcode(prev).mode
     const visualChange =
@@ -2224,6 +2280,32 @@ export class Editor {
     this.events.emit('document:session', { state: 'active' })
     this.fitView()
   }
+}
+
+/** Draw bitmap into a cols×rows canvas and return RGBA (for dither → G-code). */
+async function sampleBitmapRgba(
+  bitmap: ImageBitmap,
+  cols: number,
+  rows: number,
+): Promise<Uint8ClampedArray> {
+  const w = Math.max(1, cols)
+  const h = Math.max(1, rows)
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const canvas = new OffscreenCanvas(w, h)
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('OffscreenCanvas 2d unavailable')
+    ctx.imageSmoothingEnabled = true
+    ctx.drawImage(bitmap, 0, 0, w, h)
+    return ctx.getImageData(0, 0, w, h).data
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) throw new Error('canvas 2d unavailable')
+  ctx.imageSmoothingEnabled = true
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  return ctx.getImageData(0, 0, w, h).data
 }
 
 /**

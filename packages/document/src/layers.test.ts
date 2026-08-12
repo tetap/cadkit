@@ -72,7 +72,7 @@ describe('CadDocument layers', () => {
     ).toBe('bidirectional')
   })
 
-  it('resolveLayerAwarePaint: line drops fill, fill drops stroke', () => {
+  it('resolveLayerAwarePaint: line drops fill, fill keeps stroke', () => {
     const doc = new CadDocument({ unit: 'mm' })
     const layer = doc.addLayer({ name: 'Paint', color: '#ef4444' })
     const linePaint = resolveLayerAwarePaint(layer, {
@@ -91,14 +91,15 @@ describe('CadDocument layers', () => {
       fill: '#2563eb',
       strokeWidth: 2,
     })
-    expect(fillPaint.stroke).toBe('none')
+    // Keep stroke so open pen/polyline paths stay visible after commit.
+    expect(fillPaint.stroke).toBe('#111827')
     expect(fillPaint.fill).toBe('#2563eb')
 
     const fillFromStroke = resolveLayerAwarePaint(fillLayer, {
       stroke: '#111827',
       fill: 'none',
     })
-    expect(fillFromStroke.stroke).toBe('none')
+    expect(fillFromStroke.stroke).toBe('#111827')
     expect(fillFromStroke.fill).toBe('#111827')
   })
 

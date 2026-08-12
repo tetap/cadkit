@@ -26,3 +26,4 @@ export {
   type OptimizeOrderOptions,
 } from './optimize-order.js'
 export { hatchPolygon, type HatchSegment } from './hatch.js'
+export { rasterToCutPaths, type ImageRasterSample } from './raster.js'

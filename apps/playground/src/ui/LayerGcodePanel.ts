@@ -47,12 +47,63 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
           <div class="${sectionCard}">
             <h3 class="${sectionTitle}">${t('layerGcode')}</h3>
             <p class="${hint} mb-3">${escapeHtml(layer.name)}</p>
-            <div class="rounded-md border border-neutral-300 bg-soft/60 px-3 py-2.5 text-xs text-ink">
+            <div class="rounded-md border border-neutral-300 bg-soft/60 px-3 py-2.5 text-xs text-ink mb-3">
               <div class="font-medium">${t('engraveImage')}</div>
               <p class="${hint} mt-1.5">${t('engraveImageHint')}</p>
             </div>
+            <label class="${fieldLabel} flex-col !items-stretch gap-1 mb-3">
+              ${t('lineSpacing')}
+              <div class="flex items-center gap-2">
+                <input type="number" id="lg-spacing" class="${fieldControl} w-full" min="0.01" step="0.01" value="${g.lineSpacing}" />
+                <span class="shrink-0 text-[10px] text-muted">mm</span>
+              </div>
+              <span class="${hint} mt-1">${t('imageScanHint')}</span>
+            </label>
+          </div>
+
+          <div class="${sectionCard}">
+            <h3 class="${sectionTitle}">${t('machineParams')}</h3>
+            <label class="${fieldLabel} mb-3 flex-col !items-stretch gap-1">
+              ${t('laserPower')}
+              <input type="number" id="lg-power" class="${fieldControl} w-full" step="1" value="${g.power}" />
+            </label>
+            <label class="${fieldLabel} mb-3 flex-col !items-stretch gap-1">
+              ${t('feedSpeed')}
+              <div class="flex items-center gap-2">
+                <input type="number" id="lg-speed" class="${fieldControl} w-full" min="1" step="10" value="${g.speed}" />
+                <span class="shrink-0 text-[10px] text-muted">mm/min</span>
+              </div>
+            </label>
+            <label class="${fieldLabel} flex-col !items-stretch gap-1">
+              ${t('passes')}
+              <input type="number" id="lg-passes" class="${fieldControl} w-full" min="1" step="1" value="${g.passes}" />
+            </label>
           </div>
         </div>`
+
+      const patchImageGcode = (partial: Partial<LayerGcodeParams>) => {
+        const current = resolveLayerGcode(editor.document.getLayer(inspectedLayerId))
+        editor.updateLayer(inspectedLayerId, {
+          gcode: { ...current, mode: 'image', ...partial },
+        })
+        store.set({ layerEpoch: store.get().layerEpoch + 1 })
+      }
+      el.querySelector('#lg-spacing')?.addEventListener('change', (ev) => {
+        const v = Number((ev.target as HTMLInputElement).value)
+        if (Number.isFinite(v) && v > 0) patchImageGcode({ lineSpacing: v })
+      })
+      el.querySelector('#lg-power')?.addEventListener('change', (ev) => {
+        const v = Number((ev.target as HTMLInputElement).value)
+        if (Number.isFinite(v)) patchImageGcode({ power: v })
+      })
+      el.querySelector('#lg-speed')?.addEventListener('change', (ev) => {
+        const v = Number((ev.target as HTMLInputElement).value)
+        if (Number.isFinite(v) && v > 0) patchImageGcode({ speed: v })
+      })
+      el.querySelector('#lg-passes')?.addEventListener('change', (ev) => {
+        const v = Number((ev.target as HTMLInputElement).value)
+        if (Number.isFinite(v) && v >= 1) patchImageGcode({ passes: Math.round(v) })
+      })
       return
     }
 

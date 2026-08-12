@@ -138,6 +138,7 @@ export type MessageKey =
   | 'engraveFill'
   | 'engraveImage'
   | 'engraveImageHint'
+  | 'imageScanHint'
   | 'lineSpacing'
   | 'fillStyle'
   | 'fillBidirectional'
@@ -397,7 +398,8 @@ const zh: Record<MessageKey, string> = {
   engraveLine: '线雕刻',
   engraveFill: '填充雕刻',
   engraveImage: '图像图层',
-  engraveImageHint: '仅存放图片，不参与线/填充雕刻。图片不能拖到雕刻图层。',
+  engraveImageHint: '导出时按扫描线烧蚀（Floyd 抖动）。图片只能放在图像图层。',
+  imageScanHint: '扫描线间距：越小越精细，G-code 也越大。',
   lineSpacing: '线间距',
   fillStyle: '填充路径样式',
   fillBidirectional: '双向填充',
@@ -659,7 +661,8 @@ const en: Record<MessageKey, string> = {
   engraveLine: 'Line',
   engraveFill: 'Fill',
   engraveImage: 'Image layer',
-  engraveImageHint: 'Raster-only. Images cannot be moved onto line/fill engraver layers.',
+  engraveImageHint: 'Raster scan engraving (Floyd dither). Images stay on image layers only.',
+  imageScanHint: 'Scanline pitch: smaller = finer detail and larger G-code.',
   lineSpacing: 'Line spacing',
   fillStyle: 'Fill path style',
   fillBidirectional: 'Bidirectional',

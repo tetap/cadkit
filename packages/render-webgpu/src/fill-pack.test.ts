@@ -27,7 +27,7 @@ describe('parseColor', () => {
 })
 
 describe('packEntityFillVertices', () => {
-  it('fan-triangulates a closed rectangle', () => {
+  it('centroid-fan triangulates a closed rectangle', () => {
     const rect = item({
       kind: 'polyline',
       fill: '#ff0000',
@@ -35,8 +35,8 @@ describe('packEntityFillVertices', () => {
     })
     expect(isClosedRing(rect.kind, rect.coords)).toBe(true)
     const packed = packEntityFillVertices([rect])
-    // 4 unique verts → 2 triangles → 6 vertices
-    expect(packed.vertexCount).toBe(6)
+    // 4 unique verts → 4 centroid triangles → 12 vertices
+    expect(packed.vertexCount).toBe(12)
   })
 
   it('skips transparent fill and open polylines', () => {

@@ -289,6 +289,31 @@ describe('entity-edit', () => {
     })
   })
 
+  it('circle radius handle resizes from center', () => {
+    const circle = {
+      id: createEntityId('c'),
+      type: 'circle' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      center: { x: 0, y: 0 },
+      radius: 40,
+    }
+    const patch = handleEditPatch(
+      circle,
+      {
+        id: `${circle.id}:radius`,
+        entityId: circle.id,
+        kind: 'radius',
+        world: { x: 40, y: 0, __space: 'world' },
+        cursor: 'ew-resize',
+      },
+      { x: 80, y: 0 },
+    )
+    expect(patch).toEqual({ radius: 80 })
+  })
+
   it('circle Arc handle opens into an arc without requiring edit mode semantics', () => {
     const circle = {
       id: createEntityId('c'),
@@ -306,7 +331,7 @@ describe('entity-edit', () => {
         id: `${circle.id}:arc-open`,
         entityId: circle.id,
         kind: 'angle',
-        world: { x: 40, y: 0, __space: 'world' },
+        world: { x: 0, y: -40, __space: 'world' },
         cursor: 'crosshair',
         appearance: 'shape-param',
         label: 'Arc',

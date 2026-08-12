@@ -15,6 +15,7 @@ import type { Entity, EntityId, LayerId, Vec2 } from '@cadkit/types'
 import { emptyAABB, expandAABB, isValidAABB } from '@cadkit/types'
 import { hatchPolygon, type HatchSegment } from './hatch.js'
 import { chainHatchPaths, optimizePathOrder } from './optimize-order.js'
+import { rasterToCutPaths, type ImageRasterSample } from './raster.js'
 
 export interface GcodeExportOptions {
   /** Travel (laser off) feed mm/min. Default 3000. */
@@ -42,6 +43,11 @@ export interface GcodeExportInput {
   layers: readonly Layer[]
   /** Optional entity lookup for nested groups / world matrices. */
   getEntity?: (id: EntityId) => Entity | undefined
+  /**
+   * Pre-sampled rasters keyed by image entity id.
+   * Without a sample, image entities are skipped (vector-only export).
+   */
+  imageRasters?: ReadonlyMap<EntityId, ImageRasterSample>
 }
 
 /** One continuous cut polyline in CAD/document space (Y-down, matches canvas). */
@@ -88,7 +94,8 @@ export interface GcodeToolpathPlan {
 /**
  * Build optimized GRBL toolpaths from document geometry.
  * Geometry sources match canvas contours (`entityToOffsetContours`);
- * fill layers use hatch; line layers stroke outlines.
+ * fill layers use hatch; line layers stroke outlines; images use raster scanlines
+ * when {@link GcodeExportInput.imageRasters} provides samples.
  */
 export function buildToolpaths(
   input: GcodeExportInput,
@@ -102,18 +109,24 @@ export function buildToolpaths(
   const doOptimize = options.optimizeOrder !== false
   const home = options.start ?? { x: 0, y: 0 }
   const lookup = input.getEntity ?? ((id: EntityId) => input.entities.find((e) => e.id === id))
+  const rasters = input.imageRasters
 
   const layerById = new Map<LayerId, Layer>()
   for (const l of input.layers) layerById.set(l.id, l)
 
   const byLayer = new Map<LayerId, Entity[]>()
   for (const e of input.entities) {
-    if (e.type === 'group' || e.type === 'image') continue
+    if (e.type === 'group') continue
     if (e.style.visible === false) continue
     const layer = layerById.get(e.layerId)
     if (layer && layer.visible === false) continue
-    // Image layers never contribute vector cuts.
-    if (resolveLayerGcode(layer).mode === 'image') continue
+    if (e.type === 'image') {
+      // Only include images that have a prepared raster sample.
+      if (!rasters?.has(e.id)) continue
+    } else if (resolveLayerGcode(layer).mode === 'image') {
+      // Vector geometry on an image layer is ignored.
+      continue
+    }
     const list = byLayer.get(e.layerId) ?? []
     list.push(e)
     byLayer.set(e.layerId, list)
@@ -182,28 +195,55 @@ export function buildToolpaths(
     gcode: LayerGcodeParams,
     start: Vec2,
   ): Vec2 {
-    if (gcode.mode === 'image') return start
-    const raw = collectCadPaths(ents, gcode, lookup)
-    // Fill: keep scanline order + adjacent serpentine joins only.
-    // NN / 2-opt scramble hatch rows into random jumps.
-    const chainTol =
-      gcode.mode === 'fill' ? Math.max(0.05, gcode.lineSpacing * 1.25) : 0.05
-    const ordered =
-      gcode.mode === 'fill'
-        ? doOptimize
-          ? chainHatchPaths(raw, chainTol)
-          : raw
-        : doOptimize
-          ? optimizePathOrder(raw, { start, chainTolerance: chainTol })
-          : raw
+    const vectors = ents.filter((e) => e.type !== 'image')
+    const images = ents.filter((e) => e.type === 'image')
+    let end = start
+
+    if (gcode.mode !== 'image' && vectors.length) {
+      const raw = collectCadPaths(vectors, gcode, lookup)
+      // Fill: keep scanline order + adjacent serpentine joins only.
+      // NN / 2-opt scramble hatch rows into random jumps.
+      const chainTol =
+        gcode.mode === 'fill' ? Math.max(0.05, gcode.lineSpacing * 1.25) : 0.05
+      const ordered =
+        gcode.mode === 'fill'
+          ? doOptimize
+            ? chainHatchPaths(raw, chainTol)
+            : raw
+          : doOptimize
+            ? optimizePathOrder(raw, { start: end, chainTolerance: chainTol })
+            : raw
+      end = pushPasses(ordered, gcode, layer, end, gcode.mode === 'fill')
+    }
+
+    if (images.length && rasters) {
+      const rasterPaths: Vec2[][] = []
+      for (const img of images) {
+        const sample = rasters.get(img.id)
+        if (!sample) continue
+        rasterPaths.push(...rasterToCutPaths(sample))
+      }
+      const chainTol = Math.max(0.05, gcode.lineSpacing * 1.25)
+      const ordered = doOptimize ? chainHatchPaths(rasterPaths, chainTol) : rasterPaths
+      end = pushPasses(ordered, gcode, layer, end, true)
+    }
+
+    return end
+  }
+
+  function pushPasses(
+    ordered: Vec2[][],
+    gcode: LayerGcodeParams,
+    layer: Layer,
+    start: Vec2,
+    preserveOrder: boolean,
+  ): Vec2 {
     let end = start
     for (let pass = 0; pass < gcode.passes; pass++) {
       const passPaths =
-        gcode.mode === 'fill'
+        preserveOrder || !doOptimize || pass === 0
           ? ordered
-          : doOptimize && pass > 0
-            ? optimizePathOrder(ordered, { start: end, chainTolerance: chainTol })
-            : ordered
+          : optimizePathOrder(ordered, { start: end, chainTolerance: 0.05 })
       for (const pts of passPaths) {
         if (pts.length < 2) continue
         const length = pathLength(pts)

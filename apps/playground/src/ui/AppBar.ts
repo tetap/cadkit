@@ -123,7 +123,8 @@ export function bindAppMenu(
           return
         }
         if (action === 'export-gcode') {
-          downloadText('cadkit.nc', editor.export.gcode(), 'text/plain')
+          const nc = await editor.export.gcode()
+          downloadText('cadkit.nc', nc, 'text/plain')
           store.set({ status: t('exported') })
           return
         }

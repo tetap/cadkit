@@ -434,7 +434,7 @@ export class SceneProjector {
 
   private resolveEntityPaint(entity: Entity): { stroke: string; fill?: string; strokeWidth: number } {
     const layer = this.doc.getLayer(entity.layerId)
-    // Layer engraver mode: line → stroke only; fill → fill only (ignore the other).
+    // Layer engraver mode: line → stroke only; fill → fill + stroke (open paths stay visible).
     return resolveLayerAwarePaint(layer, entity.style)
   }
 

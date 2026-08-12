@@ -18,7 +18,7 @@ await editor.import.image(file)
 
 const svg = editor.export.svg()
 const json = editor.export.json()
-const gcode = editor.export.gcode()
+const gcode = await editor.export.gcode()
 ```
 
 ---
@@ -96,7 +96,7 @@ Layer params (`Layer.gcode`):
 Export enables **travel optimization** by default (chain → NN with closed-loop entry / reverse → 2-opt). Cut geometry length is unchanged — only order and direction.
 
 ```ts
-const gcode = editor.export.gcode({
+const gcode = await editor.export.gcode({
   travelSpeed: 3000,
   flipY: true,
   optimizeOrder: true,

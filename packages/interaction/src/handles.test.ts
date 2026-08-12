@@ -48,11 +48,14 @@ describe('handles', () => {
       center: { x: 50, y: 50 },
       radius: 10,
     }
-    // Full circle: single Figma-like Arc opener.
+    // Full circle: center + radius + Arc opener.
     const circleHandles = buildsHandlesForEntity(circle, cam)
-    expect(circleHandles).toHaveLength(1)
-    expect(circleHandles[0]!.id.endsWith(':arc-open')).toBe(true)
-    expect(circleHandles[0]!.label).toBe('Arc')
+    expect(circleHandles.map((h) => h.id.replace(`${circle.id}:`, ''))).toEqual([
+      'center',
+      'radius',
+      'arc-open',
+    ])
+    expect(circleHandles.find((h) => h.id.endsWith(':arc-open'))?.label).toBe('Arc')
   })
 
   it('builds arc Start / Sweep / center handles with labels', () => {
