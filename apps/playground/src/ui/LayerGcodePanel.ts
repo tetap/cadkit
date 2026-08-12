@@ -1,26 +1,25 @@
 import type { Editor, LayerFillStyle, LayerGcodeParams } from '@cadkit/editor'
-import { resolveLayerGcode } from '@cadkit/editor'
+import { isImageLayer, resolveLayerGcode } from '@cadkit/editor'
 import type { LayerId } from '@cadkit/types'
 import type { AppStore } from '../app/store.js'
 import { t } from '../i18n/index.js'
 import { fieldControl, fieldLabel, hint, sectionCard, sectionTitle } from './tokens.js'
 
-const FILL_STYLES: Array<{ value: LayerFillStyle; labelKey: 'fillBidirectional' | 'fillCrossHatch' | 'fillShapesIndividually' | 'fillOffset' }> =
-  [
-    { value: 'bidirectional', labelKey: 'fillBidirectional' },
-    { value: 'crossHatch', labelKey: 'fillCrossHatch' },
-    { value: 'shapesIndividually', labelKey: 'fillShapesIndividually' },
-    { value: 'offset', labelKey: 'fillOffset' },
-  ]
+const FILL_STYLES: Array<{ value: LayerFillStyle; labelKey: 'fillBidirectional' | 'fillCrossHatch' }> = [
+  { value: 'bidirectional', labelKey: 'fillBidirectional' },
+  { value: 'crossHatch', labelKey: 'fillCrossHatch' },
+]
 
 /**
- * Right-sidebar form for per-layer GRBL / G-code params.
- * Shown only while a layer is inspected (click in the layers dock).
- * Does not affect canvas rendering.
+ * Right-sidebar form for per-layer engraver mode + GRBL params.
+ * Image layers are separate (no line/fill coupling).
  */
 export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: AppStore): () => void {
+  const targetLayerId = (): LayerId | null =>
+    store.get().inspectedLayerId ?? editor.getActiveLayerId() ?? null
+
   const render = () => {
-    const { inspectedLayerId } = store.get()
+    const inspectedLayerId = targetLayerId()
     if (!inspectedLayerId) {
       el.innerHTML = `
         <div class="flex h-full flex-col justify-center px-4 py-8">
@@ -31,12 +30,31 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
 
     const layer = editor.document.getLayer(inspectedLayerId)
     if (!layer) {
-      store.set({ inspectedLayerId: null })
+      el.innerHTML = `
+        <div class="flex h-full flex-col justify-center px-4 py-8">
+          <p class="${hint} text-center">${t('layerGcodeEmpty')}</p>
+        </div>`
       return
     }
 
     const g = resolveLayerGcode(layer)
+    const imageLayer = isImageLayer(layer)
     const isFill = g.mode === 'fill'
+
+    if (imageLayer) {
+      el.innerHTML = `
+        <div class="px-3 py-3">
+          <div class="${sectionCard}">
+            <h3 class="${sectionTitle}">${t('layerGcode')}</h3>
+            <p class="${hint} mb-3">${escapeHtml(layer.name)}</p>
+            <div class="rounded-md border border-neutral-300 bg-soft/60 px-3 py-2.5 text-xs text-ink">
+              <div class="font-medium">${t('engraveImage')}</div>
+              <p class="${hint} mt-1.5">${t('engraveImageHint')}</p>
+            </div>
+          </div>
+        </div>`
+      return
+    }
 
     el.innerHTML = `
       <div class="px-3 py-3">
@@ -83,6 +101,14 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
                 ).join('')}
               </select>
             </label>
+            <label class="${fieldLabel} flex-col !items-stretch gap-1">
+              ${t('fillAngle')}
+              <div class="flex items-center gap-2">
+                <input type="number" id="lg-fill-angle" class="${fieldControl} w-full" min="0" max="179.9" step="1" value="${fmtAngle(g.fillAngle)}" />
+                <span class="shrink-0 text-[10px] text-muted">°</span>
+              </div>
+              <span class="${hint} mt-1">${t('fillAngleHint')}</span>
+            </label>
           </div>
         </div>
 
@@ -90,10 +116,7 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
           <h3 class="${sectionTitle}">${t('machineParams')}</h3>
           <label class="${fieldLabel} mb-3 flex-col !items-stretch gap-1">
             ${t('laserPower')}
-            <div class="flex items-center gap-2">
-              <input type="number" id="lg-power" class="${fieldControl} w-full" min="0" max="1000" step="1" value="${g.power}" />
-              <span class="shrink-0 text-[10px] text-muted">0–1000</span>
-            </div>
+            <input type="number" id="lg-power" class="${fieldControl} w-full" step="1" value="${g.power}" />
           </label>
           <label class="${fieldLabel} mb-3 flex-col !items-stretch gap-1">
             ${t('feedSpeed')}
@@ -114,6 +137,7 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
 
     const patchGcode = (partial: Partial<LayerGcodeParams>) => {
       const current = resolveLayerGcode(editor.document.getLayer(inspectedLayerId))
+      if (current.mode === 'image') return
       editor.updateLayer(inspectedLayerId, { gcode: { ...current, ...partial } })
       store.set({ layerEpoch: store.get().layerEpoch + 1 })
     }
@@ -132,6 +156,10 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
       const v = (ev.target as HTMLSelectElement).value as LayerFillStyle
       patchGcode({ fillStyle: v })
     })
+    el.querySelector('#lg-fill-angle')?.addEventListener('change', (ev) => {
+      const v = Number((ev.target as HTMLInputElement).value)
+      if (Number.isFinite(v)) patchGcode({ fillAngle: v })
+    })
     el.querySelector('#lg-power')?.addEventListener('change', (ev) => {
       const v = Number((ev.target as HTMLInputElement).value)
       if (Number.isFinite(v)) patchGcode({ power: v })
@@ -147,6 +175,12 @@ export function mountLayerGcodePanel(el: HTMLElement, editor: Editor, store: App
   }
 
   return store.subscribeKeys(['inspectedLayerId', 'layerEpoch', 'localeTick'], render)
+}
+
+function fmtAngle(n: number): string {
+  if (!Number.isFinite(n)) return '0'
+  const r = Math.round(n * 10) / 10
+  return String(r)
 }
 
 function escapeHtml(s: string): string {

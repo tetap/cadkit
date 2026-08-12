@@ -20,6 +20,7 @@
     "@cadkit/geometry": "workspace:*",
     "@cadkit/guides": "workspace:*",
     "@cadkit/io-dxf": "workspace:*",
+    "@cadkit/io-gcode": "workspace:*",
     "@cadkit/io-svg": "workspace:*",
     "@cadkit/render-webgpu": "workspace:*",
     "@cadkit/scene": "workspace:*",

@@ -8,6 +8,7 @@
 
 import { SVGPathData } from 'svg-pathdata'
 import { layoutArcText } from '@cadkit/geometry'
+import { exportSvgDocument } from './export-document.js'
 import {
   type Entity,
   type EntityStyle,
@@ -142,82 +143,9 @@ export async function parseSvg(source: string, options: SvgImportOptions = {}): 
   return { entities, warnings }
 }
 
-export function exportSvg(entities: Entity[], width = 800, height = 600): string {
-  const parts = [
-    `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-  ]
-  for (const e of entities) {
-    if (e.type === 'line') {
-      parts.push(
-        `<line x1="${e.start.x}" y1="${e.start.y}" x2="${e.end.x}" y2="${e.end.y}" stroke="${e.style.stroke ?? '#000'}" stroke-width="${e.style.strokeWidth ?? 1}" />`,
-      )
-    } else if (e.type === 'circle') {
-      parts.push(
-        `<circle cx="${e.center.x}" cy="${e.center.y}" r="${e.radius}" stroke="${e.style.stroke ?? '#000'}" fill="none" />`,
-      )
-    } else if (e.type === 'path') {
-      parts.push(`<path d="${escapeAttr(e.d)}" stroke="${e.style.stroke ?? '#000'}" fill="none" />`)
-    } else if (e.type === 'polyline') {
-      const pts = e.points.map((p) => `${p.x},${p.y}`).join(' ')
-      parts.push(
-        e.closed
-          ? `<polygon points="${pts}" stroke="${e.style.stroke ?? '#000'}" fill="none" />`
-          : `<polyline points="${pts}" stroke="${e.style.stroke ?? '#000'}" fill="none" />`,
-      )
-    } else if (e.type === 'bezier') {
-      const [p0, p1, p2, p3] = e.points
-      if (p0 && p1 && p2 && p3) {
-        parts.push(
-          `<path d="M${p0.x} ${p0.y} C${p1.x} ${p1.y} ${p2.x} ${p2.y} ${p3.x} ${p3.y}" stroke="${e.style.stroke ?? '#000'}" fill="none" />`,
-        )
-      }
-    } else if (e.type === 'text') {
-      if (e.path?.kind === 'arc') {
-        const poses = layoutArcText(
-          e.content,
-          e.fontSize,
-          e.position,
-          e.path,
-          e.widthFactor ?? 1,
-        )
-        for (const g of poses) {
-          if (g.char === ' ') continue
-          const deg = (g.rotation * 180) / Math.PI
-          parts.push(
-            `<text x="${g.x}" y="${g.y}" text-anchor="middle" font-family="${escapeAttr(e.fontFamily)}" font-size="${e.fontSize}" transform="rotate(${deg} ${g.x} ${g.y})">${escapeXml(g.char)}</text>`,
-          )
-        }
-      } else {
-        const lines = e.content.split(/\r?\n/u)
-        const anchor = e.align === 'center' ? 'middle' : e.align === 'right' ? 'end' : 'start'
-        const content =
-          lines.length === 1
-            ? escapeXml(lines[0] ?? '')
-            : lines
-                .map(
-                  (line, index) =>
-                    `<tspan x="${e.position.x}" dy="${index === 0 ? 0 : '1em'}">${escapeXml(line || ' ')}</tspan>`,
-                )
-                .join('')
-        parts.push(
-          `<text x="${e.position.x}" y="${e.position.y}" text-anchor="${anchor}" font-family="${escapeAttr(e.fontFamily)}" font-size="${e.fontSize}">${content}</text>`,
-        )
-      }
-    } else if (e.type === 'image') {
-      const [a, b, c, d, ee, f] = e.transform
-      const t =
-        a !== 1 || b !== 0 || c !== 0 || d !== 1 || ee !== 0 || f !== 0
-          ? ` transform="matrix(${a} ${b} ${c} ${d} ${ee} ${f})"`
-          : ''
-      const par = e.preserveAspectRatio === false ? 'none' : 'xMidYMid meet'
-      parts.push(
-        `<image href="${escapeAttr(e.href)}" x="${e.origin.x}" y="${e.origin.y}" width="${e.width}" height="${e.height}" preserveAspectRatio="${par}"${t} />`,
-      )
-    }
-  }
-  parts.push('</svg>')
-  return parts.join('\n')
+/** @deprecated Prefer {@link exportSvgDocument} for layer-aware / world-space export. */
+export function exportSvg(entities: Entity[], _width = 800, _height = 600): string {
+  return exportSvgDocument({ entities })
 }
 
 function pushShape(

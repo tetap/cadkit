@@ -21,6 +21,7 @@ describe('TextOverlay', () => {
     camera.setViewport(776, 576)
     camera.setZoom(2)
 
+    // Committed text is GPU vector — overlay must not create DOM labels.
     overlay.update(
       [
         {
@@ -38,17 +39,13 @@ describe('TextOverlay', () => {
       ],
       camera,
     )
-
-    const label = overlay.root.querySelector('div')
-    expect(label?.textContent).toBe('Hello')
-    expect(label?.style.display).toBe('block')
-    expect(Number.parseFloat(label?.style.fontSize ?? '0')).toBeGreaterThan(0)
+    expect(overlay.root.querySelector('div')).toBeNull()
 
     overlay.dispose()
     host.remove()
   })
 
-  it('renders one glyph node per character for arc text', () => {
+  it('renders draft arc glyphs (committed arc text is GPU outlines)', () => {
     const host = document.createElement('div')
     Object.assign(host.style, { position: 'relative', width: '800px', height: '600px' })
     document.body.appendChild(host)
@@ -59,31 +56,25 @@ describe('TextOverlay', () => {
     camera.setViewport(800, 600)
     camera.setZoom(1)
 
-    const id = createEntityId('arc-text')
-    overlay.update(
-      [
-        {
-          id,
-          type: 'text',
-          layerId: createEntityId('layer'),
-          style: { fill: '#111827' },
-          transform: IDENTITY_TRANSFORM,
-          version: 1,
-          content: 'ABC',
-          position: { x: 0, y: 0 },
-          fontFamily: 'sans-serif',
-          fontSize: 14,
-          path: { kind: 'arc', radius: 50, startAngle: -Math.PI / 2, sweep: Math.PI },
-        },
-      ],
-      camera,
-    )
+    overlay.setDraft({
+      entityId: null,
+      content: 'ABC',
+      caret: 3,
+      world: { x: 0, y: 0 },
+      fontSize: 14,
+      fontFamily: 'sans-serif',
+      color: '#111827',
+      path: { kind: 'arc', radius: 50, startAngle: -Math.PI / 2, sweep: Math.PI },
+    })
+    overlay.update([], camera)
 
-    expect(overlay.countGlyphNodes(id)).toBe(3)
-    // Arc guide SVG was removed; glyphs alone represent curve text on canvas.
-    expect(overlay.root.querySelector('svg path')).toBeNull()
+    // Invisible glyph spans remain for arc caret metrics. SVG outlines appear
+    // when canvas/font tracing is available (browser); may be empty in happy-dom.
+    expect(overlay.root.querySelectorAll('[data-cadkit-glyph]').length).toBe(3)
     const glyph = overlay.root.querySelector('[data-cadkit-glyph="1"]') as HTMLElement | null
     expect(glyph?.style.transformOrigin).toBe('0 0')
+    expect(Number.parseFloat(glyph?.style.width || '0')).toBeGreaterThan(0)
+    expect(Number.parseFloat(glyph?.style.height || '0')).toBe(14)
 
     overlay.dispose()
     host.remove()

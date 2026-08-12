@@ -18,11 +18,14 @@ import {
   createBlockId,
   IDENTITY_TRANSFORM,
 } from '@cadkit/types'
-import { DXF_INSUNITS_TO_MM, MM_PER_UNIT, dxfInsUnitsToLengthUnit, type LengthUnit } from '@cadkit/geometry'
 import {
+  DXF_INSUNITS_TO_MM,
+  MM_PER_UNIT,
+  dxfInsUnitsToLengthUnit,
   optimizeImportPaths,
+  type LengthUnit,
   type OptimizeImportPathsOptions,
-} from './optimize-paths.js'
+} from '@cadkit/geometry'
 
 export interface DxfWarning {
   code: string

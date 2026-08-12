@@ -92,6 +92,110 @@ describe('pickEntity', () => {
     expect(hit).toBe(id)
   })
 
+  it('picks the front entity after within-layer stack reorder', () => {
+    const doc = new CadDocument()
+    const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)
+    const camera = new Camera2D()
+    camera.setViewport(800, 600)
+    camera.setZoom(1)
+    const layer = doc.getDefaultLayerId()
+    const a = createEntityId('a')
+    const b = createEntityId('b')
+    scene.applyChange(
+      doc.add({
+        id: a,
+        type: 'polyline',
+        layerId: layer,
+        style: {},
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        points: [
+          { x: 0, y: 0 },
+          { x: 80, y: 0 },
+          { x: 80, y: 80 },
+          { x: 0, y: 80 },
+        ],
+        closed: true,
+      }),
+    )
+    scene.applyChange(
+      doc.add({
+        id: b,
+        type: 'polyline',
+        layerId: layer,
+        style: {},
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        points: [
+          { x: 20, y: 20 },
+          { x: 100, y: 20 },
+          { x: 100, y: 100 },
+          { x: 20, y: 100 },
+        ],
+        closed: true,
+      }),
+    )
+    // Newest (b) is front.
+    expect(pickEntity({ doc, camera, scene }, worldPoint(40, 40), screenPoint(40, 40))).toBe(b)
+    doc.sendToBack([b])
+    scene.notifyStackChanged()
+    expect(pickEntity({ doc, camera, scene }, worldPoint(40, 40), screenPoint(40, 40))).toBe(a)
+  })
+
+  it('picks the front layer entity when stacks overlap after reorder', () => {
+    const doc = new CadDocument()
+    const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)
+    const camera = new Camera2D()
+    camera.setViewport(800, 600)
+    camera.setZoom(1)
+
+    const base = doc.getDefaultLayerId()
+    const topLayer = doc.addLayer({ name: 'Top' })
+    const older = createEntityId('older')
+    const newer = createEntityId('newer')
+    // Create on base first (higher pickId would win without layer bands).
+    scene.applyChange(
+      doc.add({
+        id: older,
+        type: 'polyline',
+        layerId: base,
+        style: {},
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        points: [
+          { x: 0, y: 0 },
+          { x: 80, y: 0 },
+          { x: 80, y: 80 },
+          { x: 0, y: 80 },
+        ],
+        closed: true,
+      }),
+    )
+    scene.applyChange(
+      doc.add({
+        id: newer,
+        type: 'polyline',
+        layerId: topLayer.id,
+        style: {},
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        points: [
+          { x: 20, y: 20 },
+          { x: 100, y: 20 },
+          { x: 100, y: 100 },
+          { x: 20, y: 100 },
+        ],
+        closed: true,
+      }),
+    )
+
+    expect(pickEntity({ doc, camera, scene }, worldPoint(40, 40), screenPoint(40, 40))).toBe(newer)
+
+    doc.reorderLayers([base, topLayer.id])
+    scene.notifyLayersChanged()
+    expect(pickEntity({ doc, camera, scene }, worldPoint(40, 40), screenPoint(40, 40))).toBe(older)
+  })
+
   it('picks the topmost (later) entity when AABBs overlap', () => {
     const doc = new CadDocument()
     const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)

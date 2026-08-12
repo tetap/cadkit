@@ -1,4 +1,6 @@
 import {
+  applyFloydSteinbergRgba,
+  applyThresholdRgba,
   gaussianKernel1D,
   hashFilterStack,
   validateCustomFilterBody,
@@ -48,6 +50,11 @@ const BUILTIN_BODIES: Record<string, string> = {
   `,
   invert: `return vec4f(1.0 - color.rgb, color.a);`,
   opacity: `return vec4f(color.rgb, color.a * clamp(a, 0.0, 1.0));`,
+  threshold: `
+    let l = dot(color.rgb, vec3f(0.2126, 0.7152, 0.0722));
+    let v = select(0.0, 1.0, l >= a);
+    return vec4f(vec3f(v), color.a);
+  `,
 }
 
 const BLUR_SHADER = /* wgsl */ `
@@ -227,8 +234,21 @@ export class FilterEngine {
     h: number,
   ): boolean {
     if (!this.device || !this.sampler) return false
+    if (op.type === 'floydSteinberg') {
+      // Serial error diffusion — applied on CPU in ImagePass before GPU chain.
+      return false
+    }
     if (op.type === 'blur') {
       return this.runBlur(src, dst, w, h, op.params.amount ?? 2)
+    }
+    if (op.type === 'threshold') {
+      const pipeline = this.builtinPipelines.get('threshold')
+      if (!pipeline || !this.paramBuffer) return false
+      const u = new Float32Array(4)
+      u[0] = op.params.cutoff ?? op.params.amount ?? 0.5
+      this.device.queue.writeBuffer(this.paramBuffer, 0, toBufferSource(u))
+      this.submitDraw(pipeline, src, dst, this.paramBuffer)
+      return true
     }
     if (op.type === 'custom') {
       const body = op.wgslBody ?? 'return color;'

@@ -1,8 +1,6 @@
 import type { EntityId, LayerId, LengthUnit } from '@cadkit/types'
 import type { ToolName } from '@cadkit/editor'
 
-export type SideTab = 'inspector' | 'effects'
-
 export interface HotProps {
   stroke: string
   fill: string
@@ -35,7 +33,6 @@ export interface AppState {
   displayUnit: LengthUnit
   gridVisible: boolean
   rulersVisible: boolean
-  sideTab: SideTab
   status: string
   metrics: MetricsSnapshot | null
   hot: HotProps
@@ -46,9 +43,11 @@ export interface AppState {
   layerEpoch: number
   /** Left floating layers dock visibility. */
   layersOpen: boolean
+  /** Right floating image-filters dock visibility. */
+  effectsOpen: boolean
   /**
-   * Layer currently inspected in the right sidebar (GRBL / G-code form).
-   * Set by clicking a layer; cleared when canvas selection changes.
+   * Layer whose G-code / engraver params are shown in the right sidebar.
+   * Defaults to the active layer; updated when selecting objects or clicking a layer.
    */
   inspectedLayerId: LayerId | null
 }
@@ -86,7 +85,6 @@ export function createAppStore(initial?: Partial<AppState>): AppStore {
     displayUnit: 'mm',
     gridVisible: true,
     rulersVisible: true,
-    sideTab: 'inspector',
     status: 'Ready',
     metrics: null,
     hot: { ...DEFAULT_HOT },
@@ -94,6 +92,7 @@ export function createAppStore(initial?: Partial<AppState>): AppStore {
     uiEpoch: 0,
     layerEpoch: 0,
     layersOpen: false,
+    effectsOpen: false,
     inspectedLayerId: null,
   }
   if (initial) {

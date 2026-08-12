@@ -1,5 +1,52 @@
 import type { CadDocument, DocumentChange } from '@cadkit/document'
-import type { Entity, EntityId, GroupEntity } from '@cadkit/types'
+import type { Entity, EntityId, GroupEntity, LayerId } from '@cadkit/types'
+
+function emptyStackChange(): DocumentChange {
+  return {
+    added: [],
+    updated: [],
+    removed: [],
+    beforeBounds: new Map(),
+    afterBounds: new Map(),
+  }
+}
+
+export type EntityStackOp = 'front' | 'back' | 'forward' | 'backward' | 'reorder'
+
+export class ReorderEntitiesCommand implements Command {
+  readonly name = 'reorderEntities'
+  private before: Record<string, EntityId[]> | null = null
+  private after: Record<string, EntityId[]> | null = null
+
+  constructor(
+    private readonly op: EntityStackOp,
+    private readonly ids: readonly EntityId[],
+    private readonly layerId?: LayerId,
+    private readonly orderedIds?: readonly EntityId[],
+  ) {}
+
+  execute(doc: CadDocument): DocumentChange | null {
+    if (!this.before) this.before = doc.getEntityOrderSnapshot()
+    let changed = false
+    if (this.op === 'reorder') {
+      if (!this.layerId || !this.orderedIds) return null
+      const prev = doc.getEntityOrder(this.layerId)
+      const next = doc.reorderEntitiesInLayer(this.layerId, this.orderedIds)
+      changed = next.length !== prev.length || next.some((id, i) => id !== prev[i])
+    } else if (this.op === 'front') changed = doc.bringToFront(this.ids)
+    else if (this.op === 'back') changed = doc.sendToBack(this.ids)
+    else if (this.op === 'forward') changed = doc.bringForward(this.ids)
+    else changed = doc.sendBackward(this.ids)
+    if (!changed && this.after == null) return null
+    this.after = doc.getEntityOrderSnapshot()
+    // Non-geometry change: empty DocumentChange keeps history entry; Editor notifies scene.
+    return emptyStackChange()
+  }
+
+  undo(doc: CadDocument): void {
+    if (this.before) doc.restoreEntityOrderSnapshot(this.before)
+  }
+}
 
 export interface Command {
   readonly name: string

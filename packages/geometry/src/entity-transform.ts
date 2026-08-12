@@ -8,6 +8,10 @@ import { decomposeTextLinear, multiply, transformPoint, type Matrix3 } from './m
  * Axis-aligned positive scales map height → `fontSize` and width → `widthFactor`
  * (compensating for fontSize changing advance). Geometric-mean baking made
  * corner/edge handles slip off the pointer for non-uniform scales.
+ *
+ * Reflections / mirrors must compose the text's local `R(θ)·S(sign(wf),1)` with
+ * the world linear map before decomposing — additive `rotation += Δ` is wrong
+ * for flipped rotated text (world H-flip ≠ local scaleX(-1) when θ ≠ 0).
  */
 export function bakeTextAffine(
   entity: TextEntity,
@@ -19,10 +23,12 @@ export function bakeTextAffine(
   const c = m[2]
   const d = m[3]
   const axisAligned = Math.abs(b) < 1e-8 && Math.abs(c) < 1e-8
+  const theta = entity.rotation ?? 0
+  const wf = entity.widthFactor ?? 1
 
   // Upright / arc text + axis-aligned positive scale (selection handles):
   // independent sx/sy so edge/corner handles track the pointer.
-  if (axisAligned && a > 0 && d > 0 && Math.abs(entity.rotation ?? 0) < 1e-8) {
+  if (axisAligned && a > 0 && d > 0 && Math.abs(theta) < 1e-8 && wf > 0) {
     const sx = a
     const sy = Math.max(d, 1e-8)
     if (entity.path?.kind === 'arc') {
@@ -30,7 +36,7 @@ export function bakeTextAffine(
         position,
         fontSize: Math.max(1e-3, entity.fontSize * sy),
         // advance ∝ fontSize, so divide sx by sy to keep arc length *= sx.
-        widthFactor: (entity.widthFactor ?? 1) * (sx / sy),
+        widthFactor: wf * (sx / sy),
         rotation: 0,
         path: {
           ...entity.path,
@@ -43,7 +49,7 @@ export function bakeTextAffine(
       position,
       fontSize: Math.max(1e-3, entity.fontSize * sy),
       // advance ∝ fontSize, so divide sx by sy to keep width *= sx.
-      widthFactor: (entity.widthFactor ?? 1) * (sx / sy),
+      widthFactor: wf * (sx / sy),
       rotation: 0,
       path: entity.path,
     }
@@ -54,8 +60,8 @@ export function bakeTextAffine(
     return {
       position,
       fontSize: Math.max(1e-3, entity.fontSize * s),
-      widthFactor: Math.abs(entity.widthFactor ?? 1),
-      rotation: entity.rotation ?? 0,
+      widthFactor: Math.abs(wf),
+      rotation: theta,
       path: {
         ...entity.path,
         radius: Math.max(1e-3, entity.path.radius * s),
@@ -65,12 +71,22 @@ export function bakeTextAffine(
     }
   }
 
-  const { scale: s, rotation: angle, widthSign } = decomposeTextLinear(m)
+  // Compose world linear · local R(θ)·S(sign(wf), 1), then recover frame.
+  const sign0 = wf < 0 ? -1 : 1
+  const absWf = Math.abs(wf)
+  const cos = Math.cos(theta)
+  const sin = Math.sin(theta)
+  const local: Matrix3 = [sign0 * cos, sign0 * sin, -sin, cos, 0, 0]
+  const worldLin: Matrix3 = [a, b, c, d, 0, 0]
+  const composed = multiply(worldLin, local)
+  const sx = Math.hypot(composed[0], composed[1])
+  const sy = Math.max(1e-8, Math.hypot(composed[2], composed[3]))
+  const { rotation: newAngle, widthSign } = decomposeTextLinear(composed)
   return {
     position,
-    fontSize: Math.max(1e-3, entity.fontSize * s),
-    widthFactor: (entity.widthFactor ?? 1) * widthSign,
-    rotation: (entity.rotation ?? 0) + angle,
+    fontSize: Math.max(1e-3, entity.fontSize * sy),
+    widthFactor: widthSign * absWf * (sx / sy),
+    rotation: newAngle,
     path: entity.path,
   }
 }

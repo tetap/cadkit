@@ -6,6 +6,8 @@ export type BuiltinFilterName =
   | 'invert'
   | 'opacity'
   | 'blur'
+  | 'floydSteinberg'
+  | 'threshold'
 
 export interface FilterOp {
   id: string
@@ -108,8 +110,72 @@ export function applyBuiltinFilterCpu(
       return [1 - r, 1 - g, 1 - b, a]
     case 'opacity':
       return [r, g, b, clamp01(a * amount)]
+    case 'threshold': {
+      const cutoff = op.params.cutoff ?? op.params.amount ?? 0.5
+      const l = 0.2126 * r + 0.7152 * g + 0.0722 * b
+      const v = l >= cutoff ? 1 : 0
+      return [v, v, v, a]
+    }
     default:
       return rgba
+  }
+}
+
+/**
+ * Floyd–Steinberg error diffusion on an RGBA buffer (0–255).
+ * Grayscale luma → quantized levels, then write RGB equal.
+ */
+export function applyFloydSteinbergRgba(
+  data: Uint8ClampedArray | Uint8Array,
+  w: number,
+  h: number,
+  params?: { levels?: number; amount?: number },
+): void {
+  const levels = Math.max(2, Math.min(16, Math.round(params?.levels ?? 2)))
+  const amount = clamp01(params?.amount ?? 1)
+  const step = 255 / (levels - 1)
+  const err = new Float32Array(w * h)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4
+      const r = data[i]! / 255
+      const g = data[i + 1]! / 255
+      const b = data[i + 2]! / 255
+      const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+      const idx = y * w + x
+      const old = clamp01(luma + err[idx]!)
+      const q = Math.round(old * (levels - 1)) / (levels - 1)
+      const mixed = old * (1 - amount) + q * amount
+      const out = Math.round(clamp01(mixed) * 255)
+      data[i] = out
+      data[i + 1] = out
+      data[i + 2] = out
+      const e = (old - q) * amount
+      if (x + 1 < w) err[idx + 1]! += (e * 7) / 16
+      if (y + 1 < h) {
+        if (x > 0) err[idx + w - 1]! += (e * 3) / 16
+        err[idx + w]! += (e * 5) / 16
+        if (x + 1 < w) err[idx + w + 1]! += (e * 1) / 16
+      }
+    }
+  }
+  void step
+}
+
+/** Binary / multi-level threshold on RGBA buffer (0–255). */
+export function applyThresholdRgba(
+  data: Uint8ClampedArray | Uint8Array,
+  _w: number,
+  _h: number,
+  params?: { cutoff?: number },
+): void {
+  const cutoff = clamp01(params?.cutoff ?? 0.5) * 255
+  for (let i = 0; i < data.length; i += 4) {
+    const l = 0.2126 * data[i]! + 0.7152 * data[i + 1]! + 0.0722 * data[i + 2]!
+    const v = l >= cutoff ? 255 : 0
+    data[i] = v
+    data[i + 1] = v
+    data[i + 2] = v
   }
 }
 

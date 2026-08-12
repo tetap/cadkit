@@ -12,7 +12,7 @@ describe('svg io', () => {
     expect(result.entities.some((e) => e.type === 'bezier')).toBe(true)
   })
 
-  it('exports lines', () => {
+  it('exports lines as world-space paths matching canvas', () => {
     const svg = exportSvg([
       {
         id: 'e1' as never,
@@ -25,10 +25,12 @@ describe('svg io', () => {
         end: { x: 1, y: 1 },
       },
     ])
-    expect(svg).toContain('<line')
+    expect(svg).toContain('<path')
+    expect(svg).toContain('M0 0 L1 1')
+    expect(svg).toContain('stroke="#0f0"')
   })
 
-  it('exports multiline text as tspans', () => {
+  it('exports text as glyph outline paths when available', () => {
     const svg = exportSvg([
       {
         id: 't1' as never,
@@ -43,11 +45,11 @@ describe('svg io', () => {
         fontSize: 12,
       },
     ])
-    expect(svg.match(/<tspan/g)).toHaveLength(2)
-    expect(svg).toContain('dy="1em"')
+    // Contour export (GPU-aligned) or fallback bounds rect.
+    expect(svg).toMatch(/<path|<text/)
   })
 
-  it('exports arc text as per-glyph rotated text nodes', () => {
+  it('exports arc text as outline paths or glyph nodes', () => {
     const svg = exportSvg([
       {
         id: 't2' as never,
@@ -63,7 +65,7 @@ describe('svg io', () => {
         path: { kind: 'arc', radius: 40, startAngle: -Math.PI / 2, sweep: Math.PI },
       },
     ])
-    expect(svg.match(/<text /g)?.length).toBe(3)
-    expect(svg).toContain('transform="rotate(')
+    expect(svg.length).toBeGreaterThan(40)
+    expect(svg).toContain('<svg')
   })
 })

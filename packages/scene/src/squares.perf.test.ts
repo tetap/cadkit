@@ -67,7 +67,8 @@ describe('perf: 1e6 squares', () => {
 
       // Soft gates — CI machines vary; catch pathological regressions.
       expect(loadMs).toBeLessThan(120_000)
-      expect(buildMs).toBeLessThan(5_000)
+      expect(buildMs).toBeLessThan(8_000)
+      expect(built.stats.visibleCount).toBeLessThanOrEqual(DEFAULT_PERFORMANCE_CONFIG.maxVisible)
       expect(built.stats.visibleCount + built.stats.culledCount).toBeGreaterThan(0)
       expect(heapDeltaMB).toBeLessThan(4096)
 

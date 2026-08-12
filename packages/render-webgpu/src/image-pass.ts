@@ -1,6 +1,11 @@
 import type { RenderItem } from '@cadkit/scene'
 import type { TextureResolver } from '@cadkit/render-core'
-import { hashFilterStack, type FilterOp } from '@cadkit/assets'
+import {
+  applyFloydSteinbergRgba,
+  applyThresholdRgba,
+  hashFilterStack,
+  type FilterOp,
+} from '@cadkit/assets'
 import { FilterEngine } from './filter-engine.js'
 
 const IMAGE_SHADER = /* wgsl */ `
@@ -122,19 +127,76 @@ export class ImagePass {
       const bitmap = textures?.getBitmap(assetId)
       if (!bitmap) continue
       try {
-        const source = this.ensureTexture(assetId, bitmap)
         const ops = item.filters as FilterOp[]
         const fkey = `${assetId}|${hashFilterStack(ops)}`
-        const filtered = this.filters.apply(assetId, source, ops)
-        // Only use filtered result when it differs from source (apply may fall back).
-        if (filtered !== source) {
+        // Floyd–Steinberg must run on CPU; peel it (and optional CPU threshold) first.
+        const cpuTone = ops.find((o) => o.type === 'floydSteinberg')
+        let source = this.ensureTexture(assetId, bitmap)
+        let gpuOps = ops
+        if (cpuTone) {
+          source = this.cpuToneTexture(assetId, bitmap, cpuTone)
+          gpuOps = ops.filter((o) => o.type !== 'floydSteinberg')
+        }
+        const filtered =
+          gpuOps.length > 0 ? this.filters.apply(assetId, source, gpuOps) : source
+        if (filtered !== this.textures.get(assetId)) {
           this.bindGroups.delete(fkey)
           this.frameFiltered.set(fkey, filtered)
+        } else if (cpuTone) {
+          this.bindGroups.delete(fkey)
+          this.frameFiltered.set(fkey, source)
         }
       } catch (err) {
         console.warn('[ImagePass] prepareFilters failed', err)
       }
     }
+  }
+
+  /** Rasterize bitmap → CPU tone (FS / threshold) → GPU texture. */
+  private cpuToneTexture(assetId: string, bitmap: ImageBitmap, op: FilterOp): GPUTexture {
+    const key = `${assetId}|cpu:${op.type}|${op.params.levels ?? ''}|${op.params.cutoff ?? ''}|${op.params.amount ?? ''}`
+    const hit = this.textures.get(key)
+    if (hit) return hit
+    const w = bitmap.width
+    const h = bitmap.height
+    const canvas =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(w, h)
+        : Object.assign(document.createElement('canvas'), { width: w, height: h })
+    const ctx = canvas.getContext('2d') as
+      | OffscreenCanvasRenderingContext2D
+      | CanvasRenderingContext2D
+      | null
+    if (!ctx) return this.ensureTexture(assetId, bitmap)
+    ctx.drawImage(bitmap, 0, 0)
+    const img = ctx.getImageData(0, 0, w, h)
+    if (op.type === 'floydSteinberg') {
+      applyFloydSteinbergRgba(img.data, w, h, op.params)
+    } else if (op.type === 'threshold') {
+      applyThresholdRgba(img.data, w, h, op.params)
+    }
+    ctx.putImageData(img, 0, 0)
+    const outBitmap =
+      typeof createImageBitmap === 'function'
+        ? // sync path unavailable — upload from canvas via copyExternalImageToTexture
+          null
+        : null
+    void outBitmap
+    const tex = this.device!.createTexture({
+      size: [w, h],
+      format: 'rgba8unorm',
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
+    })
+    this.device!.queue.copyExternalImageToTexture(
+      { source: canvas as OffscreenCanvas | HTMLCanvasElement },
+      { texture: tex },
+      [w, h],
+    )
+    this.textures.set(key, tex)
+    return tex
   }
 
   draw(

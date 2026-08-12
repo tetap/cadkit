@@ -2,13 +2,39 @@ import type { ControlHandle } from './handles.js'
 import { worldToEntityLocal } from './handles.js'
 import type { Entity, EntityId, PolylineEntity, Vec2 } from '@cadkit/types'
 import {
+  buildStarPath,
+  parseRectCornerId,
+  pointsAABB,
+  rectCornerRadiusFromLocal,
   slideArcTextOnCircle,
+  starCenter,
+  starConstructionRadius,
+  starCornerFromHandleX,
+  starTipsFromDelta,
+  starTipsFromHandleY,
+  tessellateRoundedRect,
   translate,
   updateArcTextPath,
   type EntityLookup,
+  type RectCornerId,
 } from '@cadkit/geometry'
 import { transformEntityPatch, worldDeltaToParentLocal } from './selection-transform.js'
 import { parsePathVertexHandleId, type PathVertexRef } from './path-vertex.js'
+
+const FULL_CIRCLE = Math.PI * 2 - 1e-3
+
+function normalizeAngle(a: number): number {
+  let x = a % (Math.PI * 2)
+  if (x < 0) x += Math.PI * 2
+  return x
+}
+
+function sweepAbs(start: number, end: number): number {
+  let s = end - start
+  while (s <= 0) s += Math.PI * 2
+  while (s > Math.PI * 2) s -= Math.PI * 2
+  return s
+}
 
 export type { PathVertexRef } from './path-vertex.js'
 
@@ -102,6 +128,47 @@ export interface HandleEditOptions {
   startRadius?: number
   /** Multiplier applied to pointer delta; defaults to {@link ARC_TEXT_RADIUS_SENSITIVITY}. */
   sensitivity?: number
+  /** Frozen star construction frame for tips / corner handle drags. */
+  starDrag?: {
+    cx: number
+    cy: number
+    outerR: number
+    tips: number
+    corner: number
+  }
+  /** Frozen rect construction box for corner-radius handle drags. */
+  rectDrag?: {
+    minX: number
+    minY: number
+    maxX: number
+    maxY: number
+    cornerId: RectCornerId
+    /** Visual pad used when placing the handle (world units). */
+    pad: number
+    /** Snapshot of shape.cornerRadii at drag start. */
+    cornerRadii: number | readonly [number, number, number, number]
+  }
+  /** Frozen angles for circle/arc/ellipse parametric handle drags. */
+  arcDrag?: {
+    startAngle: number
+    endAngle: number
+  }
+}
+
+function ellipseParamAngle(
+  center: Vec2,
+  radiusX: number,
+  radiusY: number,
+  rotation: number,
+  local: Vec2,
+): number {
+  const dx = local.x - center.x
+  const dy = local.y - center.y
+  const c = Math.cos(-rotation)
+  const s = Math.sin(-rotation)
+  const lx = dx * c - dy * s
+  const ly = dx * s + dy * c
+  return Math.atan2(ly / Math.max(radiusY, 1e-9), lx / Math.max(radiusX, 1e-9))
 }
 
 /**
@@ -121,10 +188,149 @@ export function handleEditPatch(
     if (handle.id.endsWith(':end')) return { end: { x: local.x, y: local.y } } as Partial<Entity>
   }
   if (entity.type === 'circle') {
+    if (handle.id.endsWith(':arc-open')) {
+      const start = opts?.arcDrag?.startAngle ?? 0
+      let end = Math.atan2(local.y - entity.center.y, local.x - entity.center.x)
+      if (sweepAbs(start, end) < 1e-3) end = start + 1e-3
+      if (sweepAbs(start, end) >= FULL_CIRCLE) return null
+      return {
+        type: 'arc',
+        center: entity.center,
+        radius: entity.radius,
+        startAngle: start,
+        endAngle: end,
+      } as Partial<Entity>
+    }
+  }
+  if (entity.type === 'arc') {
     if (handle.kind === 'center') return { center: { x: local.x, y: local.y } } as Partial<Entity>
-    if (handle.kind === 'radius') {
-      const r = Math.hypot(local.x - entity.center.x, local.y - entity.center.y)
-      return { radius: Math.max(1e-6, r) } as Partial<Entity>
+    // Continue an open gesture after circle→arc conversion (handle id stays :arc-open).
+    if (handle.id.endsWith(':arc-open') || handle.id.endsWith(':arc-sweep') || handle.id.endsWith(':arc-end')) {
+      const start = opts?.arcDrag?.startAngle ?? entity.startAngle
+      let end = Math.atan2(local.y - entity.center.y, local.x - entity.center.x)
+      if (sweepAbs(start, end) < 1e-3) end = start + 1e-3
+      if (sweepAbs(start, end) >= FULL_CIRCLE) {
+        // Snap back to a full circle when the sweep closes.
+        return {
+          type: 'circle',
+          center: entity.center,
+          radius: entity.radius,
+          startAngle: undefined,
+          endAngle: undefined,
+        } as Partial<Entity>
+      }
+      return { startAngle: start, endAngle: end } as Partial<Entity>
+    }
+    if (handle.id.endsWith(':arc-start')) {
+      const prevStart = opts?.arcDrag?.startAngle ?? entity.startAngle
+      const prevEnd = opts?.arcDrag?.endAngle ?? entity.endAngle
+      const nextStart = Math.atan2(local.y - entity.center.y, local.x - entity.center.x)
+      const delta = nextStart - prevStart
+      return {
+        startAngle: nextStart,
+        endAngle: prevEnd + delta,
+      } as Partial<Entity>
+    }
+  }
+  if (entity.type === 'ellipse') {
+    if (handle.kind === 'center') return { center: { x: local.x, y: local.y } } as Partial<Entity>
+    const angle = ellipseParamAngle(
+      entity.center,
+      entity.radiusX,
+      entity.radiusY,
+      entity.rotation,
+      local,
+    )
+    if (handle.id.endsWith(':arc-open') || handle.id.endsWith(':arc-sweep')) {
+      const start = opts?.arcDrag?.startAngle ?? entity.startAngle
+      let end = angle
+      if (sweepAbs(start, end) < 1e-3) end = start + 1e-3
+      if (sweepAbs(start, end) >= FULL_CIRCLE) {
+        return { startAngle: 0, endAngle: Math.PI * 2 } as Partial<Entity>
+      }
+      return { startAngle: start, endAngle: end } as Partial<Entity>
+    }
+    if (handle.id.endsWith(':arc-start')) {
+      const prevStart = opts?.arcDrag?.startAngle ?? entity.startAngle
+      const prevEnd = opts?.arcDrag?.endAngle ?? entity.endAngle
+      const delta = angle - prevStart
+      return {
+        startAngle: angle,
+        endAngle: prevEnd + delta,
+      } as Partial<Entity>
+    }
+  }
+  if (entity.type === 'polyline' && entity.shape?.kind === 'rect') {
+    const cornerId = parseRectCornerId(handle.id)
+    if (cornerId) {
+      const live = pointsAABB(entity.points)
+      const box = opts?.rectDrag ?? live
+      const pad = opts?.rectDrag?.pad ?? 0
+      const prevRadii = opts?.rectDrag?.cornerRadii ?? entity.shape.cornerRadii ?? 0
+      const r = rectCornerRadiusFromLocal(box, cornerId, local, pad)
+      // Uniform number stays uniform; tuple updates only the dragged corner.
+      let cornerRadii: number | [number, number, number, number]
+      if (typeof prevRadii === 'number' || prevRadii == null) {
+        cornerRadii = r
+      } else {
+        const next: [number, number, number, number] = [
+          prevRadii[0] ?? 0,
+          prevRadii[1] ?? 0,
+          prevRadii[2] ?? 0,
+          prevRadii[3] ?? 0,
+        ]
+        const idx = { tl: 0, tr: 1, br: 2, bl: 3 }[cornerId]
+        next[idx] = r
+        cornerRadii = next
+      }
+      const shape = { ...entity.shape, cornerRadii }
+      return {
+        shape,
+        points: tessellateRoundedRect(box.minX, box.minY, box.maxX, box.maxY, cornerRadii),
+      } as Partial<Entity>
+    }
+  }
+  if (entity.type === 'polyline' && entity.shape?.kind === 'star') {
+    const liveTips = entity.shape.points ?? 5
+    const liveCorner =
+      typeof entity.shape.cornerRadii === 'number'
+        ? entity.shape.cornerRadii
+        : (entity.shape.cornerRadii?.[0] ?? 0)
+    const { cx: liveCx, cy: liveCy } = starCenter(entity.points)
+    const liveOuterR = starConstructionRadius(
+      entity.points,
+      liveCx,
+      liveCy,
+      liveTips,
+      liveCorner,
+    )
+    const cx = opts?.starDrag?.cx ?? liveCx
+    const cy = opts?.starDrag?.cy ?? liveCy
+    const outerR = Math.max(1e-6, opts?.starDrag?.outerR ?? liveOuterR)
+    if (handle.id.endsWith(':star-tips')) {
+      const corner = opts?.starDrag?.corner ?? liveCorner
+      const startTips = opts?.starDrag?.tips ?? liveTips
+      let tips: number
+      if (opts?.starDrag && opts.startWorld) {
+        const startLocal = worldToEntityLocal(entity, opts.startWorld, lookup)
+        tips = starTipsFromDelta(startTips, outerR, local.y - startLocal.y)
+      } else {
+        tips = starTipsFromHandleY(cy, outerR, local.y)
+      }
+      const shape = { ...entity.shape, points: tips, cornerRadii: corner }
+      return {
+        shape,
+        points: buildStarPath(cx, cy, outerR, tips, 0.4, corner),
+      } as Partial<Entity>
+    }
+    if (handle.id.endsWith(':star-corner')) {
+      const corner = starCornerFromHandleX(cx, outerR, local.x)
+      const tips = opts?.starDrag?.tips ?? liveTips
+      const shape = { ...entity.shape, points: tips, cornerRadii: corner }
+      return {
+        shape,
+        points: buildStarPath(cx, cy, outerR, tips, 0.4, corner),
+      } as Partial<Entity>
     }
   }
   if (entity.type === 'polyline' && handle.kind === 'endpoint') {

@@ -93,6 +93,13 @@ export class Camera2D {
     this.version++
   }
 
+  /** Place the viewport's top-left at a world point (rotation = 0). */
+  setTopLeft(world: WorldPoint): void {
+    this.x = world.x
+    this.y = world.y
+    this.version++
+  }
+
   fitBounds(bounds: AABB, padding = 40): void {
     const w = bounds.maxX - bounds.minX
     const h = bounds.maxY - bounds.minY

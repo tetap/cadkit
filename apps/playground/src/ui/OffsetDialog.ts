@@ -56,7 +56,8 @@ export function openOffsetDialog(
 
   const refreshPreview = () => {
     if (!(state.distance > 0)) {
-      editor.clearPreview()
+      // Keep the live offset session alive so moving the selection still tracks.
+      editor.clearPreviewGeometry()
       return
     }
     editor.previewOffsetSelection(toOptions(state))

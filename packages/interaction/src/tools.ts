@@ -8,7 +8,16 @@ import {
   type WorldPoint,
 } from '@cadkit/types'
 import type { Camera2D } from '@cadkit/geometry'
-import { measureTextAdvance, resolveWorldMatrix, transformPoint } from '@cadkit/geometry'
+import {
+  measureTextAdvance,
+  parseRectCornerId,
+  pointsAABB,
+  resolveWorldMatrix,
+  starCenter,
+  starConstructionRadius,
+  transformPoint,
+  type RectCornerId,
+} from '@cadkit/geometry'
 import type { CadDocument, DocumentChange } from '@cadkit/document'
 import type { SceneProjector } from '@cadkit/scene'
 import { SelectionSet } from './selection.js'
@@ -59,6 +68,8 @@ export type ToolName =
   | 'rectangle'
   | 'ellipse'
   | 'circle'
+  | 'heart'
+  | 'star'
   | 'polyline'
   | 'pen'
   | 'brush'
@@ -104,6 +115,7 @@ export interface ToolContext {
   /** Start IME text editing at a screen position. */
   beginTextEdit?: (opts: {
     entityId?: EntityId
+    layerId?: import('@cadkit/types').LayerId
     world: WorldPoint
     screenX: number
     screenY: number
@@ -185,6 +197,26 @@ export class SelectTool implements Tool {
     startWorld: WorldPoint
     startCenter?: { x: number; y: number }
     startRadius?: number
+    starDrag?: {
+      cx: number
+      cy: number
+      outerR: number
+      tips: number
+      corner: number
+    }
+    rectDrag?: {
+      minX: number
+      minY: number
+      maxX: number
+      maxY: number
+      cornerId: RectCornerId
+      pad: number
+      cornerRadii: number | readonly [number, number, number, number]
+    }
+    arcDrag?: {
+      startAngle: number
+      endAngle: number
+    }
   } | null = null
   private transformDrag: TransformDrag | null = null
   private suppressBox = false
@@ -275,11 +307,20 @@ export class SelectTool implements Tool {
     }
     const frame = this.getSelectionFrame(ctx)
     const handles = frame ? buildTransformHandles(frame.box, ctx.camera, frame.rotation) : []
-    // Single arc-text: expose center / radius shortcuts on the canvas.
+    // Single selection: parametric shape / arc-text handles without entering edit mode.
     const ids = ctx.selection.toArray()
     if (ids.length === 1) {
       const e = ctx.doc.getEntity(ids[0]!)
-      if (e?.type === 'text' && e.path?.kind === 'arc') {
+      const shapeKind = e?.type === 'polyline' ? e.shape?.kind : null
+      if (
+        (e?.type === 'text' && e.path?.kind === 'arc') ||
+        e?.type === 'circle' ||
+        e?.type === 'arc' ||
+        e?.type === 'ellipse' ||
+        (e?.type === 'polyline' &&
+          e.closed &&
+          (shapeKind === 'rect' || shapeKind === 'star'))
+      ) {
         handles.push(
           ...buildsHandlesForEntity(e, ctx.camera, (eid) => ctx.doc.getEntity(eid)),
         )
@@ -400,12 +441,81 @@ export class SelectTool implements Tool {
           entity?.type === 'text' && entity.path?.kind === 'arc'
             ? { position: entity.position, radius: entity.path.radius }
             : null
+        let starDrag:
+          | {
+              cx: number
+              cy: number
+              outerR: number
+              tips: number
+              corner: number
+            }
+          | undefined
+        let rectDrag:
+          | {
+              minX: number
+              minY: number
+              maxX: number
+              maxY: number
+              cornerId: RectCornerId
+              pad: number
+              cornerRadii: number | readonly [number, number, number, number]
+            }
+          | undefined
+        let arcDrag: { startAngle: number; endAngle: number } | undefined
+        if (
+          entity?.type === 'circle' &&
+          (handle.id.endsWith(':arc-open') || handle.id.endsWith(':arc-start'))
+        ) {
+          arcDrag = { startAngle: 0, endAngle: Math.PI * 2 }
+        } else if (entity?.type === 'arc') {
+          arcDrag = { startAngle: entity.startAngle, endAngle: entity.endAngle }
+        } else if (entity?.type === 'ellipse') {
+          arcDrag = { startAngle: entity.startAngle, endAngle: entity.endAngle }
+        }
+        if (
+          entity?.type === 'polyline' &&
+          entity.shape?.kind === 'star' &&
+          (handle.id.endsWith(':star-tips') || handle.id.endsWith(':star-corner'))
+        ) {
+          const { cx, cy } = starCenter(entity.points)
+          const tips = entity.shape.points ?? 5
+          const corner =
+            typeof entity.shape.cornerRadii === 'number'
+              ? entity.shape.cornerRadii
+              : (entity.shape.cornerRadii?.[0] ?? 0)
+          starDrag = {
+            cx,
+            cy,
+            outerR: starConstructionRadius(entity.points, cx, cy, tips, corner),
+            tips,
+            corner,
+          }
+        }
+        if (entity?.type === 'polyline' && entity.shape?.kind === 'rect') {
+          const cornerId = parseRectCornerId(handle.id)
+          if (cornerId) {
+            const box = pointsAABB(entity.points)
+            const prev = entity.shape.cornerRadii ?? 0
+            rectDrag = {
+              minX: box.minX,
+              minY: box.minY,
+              maxX: box.maxX,
+              maxY: box.maxY,
+              cornerId,
+              pad: 10 / Math.max(ctx.camera.getState().zoom, 1e-9),
+              cornerRadii: prev,
+            }
+          }
+        }
         this.handleDrag = {
           handle,
           session: `handle:${handle.id}:${Date.now()}`,
           startWorld: world,
           startCenter: arcText ? { ...arcText.position } : undefined,
           startRadius: arcText?.radius,
+          starDrag,
+          rectDrag,
+          arcDrag,
         }
         this.transformDrag = null
       }
@@ -522,7 +632,8 @@ export class SelectTool implements Tool {
 
     if (this.handleDrag) {
       this.hoverId = null
-      const { handle, session, startWorld, startCenter, startRadius } = this.handleDrag
+      const { handle, session, startWorld, startCenter, startRadius, starDrag, rectDrag, arcDrag } =
+        this.handleDrag
       const entity = ctx.doc.getEntity(handle.entityId)
       if (!entity || !ctx.applyPatches) return
       const patch = handleEditPatch(
@@ -530,7 +641,7 @@ export class SelectTool implements Tool {
         handle,
         world,
         (eid) => ctx.doc.getEntity(eid),
-        { startWorld, startCenter, startRadius },
+        { startWorld, startCenter, startRadius, starDrag, rectDrag, arcDrag },
       )
       if (!patch) return
       ctx.applyPatches(new Map([[handle.entityId, patch]]), session)
@@ -681,6 +792,7 @@ export class SelectTool implements Tool {
       ctx.onSelectionEdited?.()
       ctx.beginTextEdit({
         entityId: hit,
+        layerId: entity.layerId,
         world: { x: anchor.x, y: anchor.y, __space: 'world' },
         screenX: anchorScreen.x,
         screenY: anchorScreen.y,

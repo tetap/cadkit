@@ -4,22 +4,24 @@ import { bindEditorEvents } from './bindEditorEvents.js'
 import { mountDevModal } from './dev/DevModal.js'
 import { seedDemoContent } from './dev/seed.js'
 import { getLocale, onLocaleChange, t } from './i18n/index.js'
-import { mountAppBar } from './ui/AppBar.js'
 import { mountContextBar } from './ui/ContextBar.js'
+import { mountEffectsPanel } from './ui/EffectsPanel.js'
+import {
+  createEntityContextMenu,
+  mountCanvasEntityContextMenu,
+} from './ui/EntityContextMenu.js'
 import { mountLayersPanel } from './ui/LayersPanel.js'
 import { mountSidePanel } from './ui/SidePanel.js'
 import { applyPersistedImportDpi, openSettingsDialog } from './ui/SettingsDialog.js'
 import { mountStatusBar } from './ui/StatusBar.js'
 import { mountToolRail } from './ui/ToolRail.js'
 import { mountViewBar } from './ui/ViewBar.js'
+import { mountGcodePreview } from './ui/GcodePreview.js'
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!
 const canvasHost = document.querySelector<HTMLElement>('#canvas-host')!
-const appBarEl = document.querySelector<HTMLElement>('#app-bar')!
 const toolRailEl = document.querySelector<HTMLElement>('#tool-rail')!
 const layersPanelEl = document.querySelector<HTMLElement>('#layers-panel')!
-const sideTabsEl = document.querySelector<HTMLElement>('#side-tabs')!
-const inspectorPanelEl = document.querySelector<HTMLElement>('#inspector-panel')!
 const effectsPanelEl = document.querySelector<HTMLElement>('#effects-panel')!
 const layerGcodePanelEl = document.querySelector<HTMLElement>('#layer-gcode-panel')!
 const contextBarEl = document.querySelector<HTMLElement>('#context-bar')!
@@ -59,9 +61,10 @@ async function boot(): Promise<void> {
   bindEditorEvents(editor, store, canvasHost)
 
   const dev = mountDevModal(devModal, devBody, editor, store)
+  const gcodePreview = mountGcodePreview(canvasHost, editor, store)
   let closeSettings: (() => void) | null = null
 
-  mountAppBar(appBarEl, editor, store, {
+  mountToolRail(toolRailEl, editor, store, {
     openDev: () => dev.open(),
     openSettings: () => {
       closeSettings?.()
@@ -69,17 +72,13 @@ async function boot(): Promise<void> {
         closeSettings = null
       })
     },
+    toggleGcodePreview: () => gcodePreview.toggle(),
   })
-  mountToolRail(toolRailEl, editor, store)
-  mountLayersPanel(layersPanelEl, editor, store)
-  mountSidePanel(
-    sideTabsEl,
-    inspectorPanelEl,
-    effectsPanelEl,
-    layerGcodePanelEl,
-    editor,
-    store,
-  )
+  const entityMenu = createEntityContextMenu(editor, store)
+  mountCanvasEntityContextMenu(canvasHost, editor, store, entityMenu)
+  mountLayersPanel(layersPanelEl, editor, store, entityMenu)
+  mountEffectsPanel(effectsPanelEl, editor, store)
+  mountSidePanel(layerGcodePanelEl, editor, store)
   mountContextBar(contextBarEl, editor, store)
   mountViewBar(viewBarEl, editor, store)
   mountStatusBar(statusBarEl, editor, store)

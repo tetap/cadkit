@@ -245,10 +245,11 @@ export function bindEditorEvents(
     const name = file.name.toLowerCase()
     const isSvg = name.endsWith('.svg') || file.type === 'image/svg+xml'
     const isDxf = name.endsWith('.dxf') || file.type.includes('dxf')
+    const isGcode = /\.(nc|gcode|ngc)$/i.test(name)
     const isImage =
       (!isSvg && file.type.startsWith('image/')) ||
       /\.(png|jpe?g|webp|gif|bmp)$/i.test(name)
-    if (!isSvg && !isDxf && !isImage) return
+    if (!isSvg && !isDxf && !isGcode && !isImage) return
     ev.preventDefault()
     store.set({ status: t('importing') })
     try {
@@ -256,6 +257,8 @@ export function bindEditorEvents(
         await editor.import.svg(await file.text())
       } else if (isDxf) {
         await editor.import.dxf(file)
+      } else if (isGcode) {
+        await editor.import.gcode(file)
       } else {
         const canvas = canvasHost.querySelector('canvas')
         if (!canvas) return

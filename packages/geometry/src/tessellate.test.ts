@@ -33,6 +33,24 @@ describe('tessellate', () => {
     expect(tight.length).toBeGreaterThanOrEqual(loose.length)
   })
 
+  it('keeps curved cubics off the chord (pen-tool regression)', () => {
+    // Tall S-curve: if subdivision incorrectly pops join points, result collapses
+    // to the straight chord and the midpoint sample sits near y≈0.
+    const pts = tessellateCubicBezier(
+      { x: 0, y: 0 },
+      { x: 0, y: 50 },
+      { x: 100, y: 50 },
+      { x: 100, y: 0 },
+      0.75,
+      1,
+    )
+    expect(pts.length).toBeGreaterThan(4)
+    expect(pts[0]).toEqual({ x: 0, y: 0 })
+    expect(pts.at(-1)).toEqual({ x: 100, y: 0 })
+    const peak = Math.max(...pts.map((p) => p.y))
+    expect(peak).toBeGreaterThan(20)
+  })
+
   it('tessellates chained cubics', () => {
     const pts = tessellateCubicChain(
       [

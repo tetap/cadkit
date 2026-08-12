@@ -6,7 +6,7 @@ import {
   type TextEntity,
 } from '@cadkit/types'
 import { entityToOffsetContours, offsetEntity } from './offset.js'
-import { textEntityToLocalOutlines } from './text-outlines.js'
+import { clearTextOutlineCache, textEntityToLocalOutlines } from './text-outlines.js'
 import { installFakeCanvas } from './fake-canvas.js'
 import { layoutArcText } from './arc-text.js'
 
@@ -30,6 +30,7 @@ describe('text outlines integration (fake canvas)', () => {
   afterEach(() => {
     restore?.()
     restore = undefined
+    clearTextOutlineCache()
   })
 
   it('straight text outlines sit on the baseline em-box (Y-down)', () => {
@@ -120,6 +121,24 @@ describe('text outlines integration (fake canvas)', () => {
     // Offset expands around em-box [24,40]
     expect(Math.min(...ys)).toBeLessThan(24)
     expect(Math.max(...ys)).toBeGreaterThan(40)
+  })
+
+  it('caches outlines so a pure translate reuses rings', () => {
+    restore = installFakeCanvas()
+    const e = text({
+      content: 'Hi',
+      position: { x: 10, y: 20 },
+      fontSize: 16,
+    })
+    const a = textEntityToLocalOutlines(e, { pixelsPerEm: undefined })
+    expect(a.length).toBeGreaterThanOrEqual(1)
+    const moved = { ...e, position: { x: 40, y: 55 }, version: e.version + 1 }
+    const b = textEntityToLocalOutlines(moved)
+    expect(b.length).toBe(a.length)
+    const dx = b[0]!.points[0]!.x - a[0]!.points[0]!.x
+    const dy = b[0]!.points[0]!.y - a[0]!.points[0]!.y
+    expect(dx).toBeCloseTo(30, 5)
+    expect(dy).toBeCloseTo(35, 5)
   })
 
   it('returns [] without canvas (fallback path stays available)', () => {

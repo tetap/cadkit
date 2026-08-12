@@ -2,7 +2,7 @@ import type { Editor, ToolName } from '@cadkit/editor'
 import type { AppStore } from '../app/store.js'
 import { t, type MessageKey } from '../i18n/index.js'
 import { pickFile } from '../pick-file.js'
-import { IMPORT_ACCEPT, importAnyFile } from './AppBar.js'
+import { bindAppMenu, IMPORT_ACCEPT, importAnyFile, type AppMenuHandlers } from './AppBar.js'
 import { ICONS, type IconName } from './icons.js'
 import { btnIcon } from './tokens.js'
 
@@ -11,7 +11,7 @@ interface ToolDef {
   icon: IconName
   labelKey: MessageKey
   tipKey: MessageKey
-  shortcut: string
+  shortcut?: string
 }
 
 const TOOLS: ToolDef[] = [
@@ -21,6 +21,8 @@ const TOOLS: ToolDef[] = [
   { name: 'rectangle', icon: 'rectangle', labelKey: 'toolRect', tipKey: 'tipRect', shortcut: 'R' },
   { name: 'ellipse', icon: 'ellipse', labelKey: 'toolEllipse', tipKey: 'tipEllipse', shortcut: 'O' },
   { name: 'circle', icon: 'circle', labelKey: 'toolCircle', tipKey: 'tipCircle', shortcut: 'C' },
+  { name: 'heart', icon: 'heart', labelKey: 'toolHeart', tipKey: 'tipHeart' },
+  { name: 'star', icon: 'star', labelKey: 'toolStar', tipKey: 'tipStar' },
   { name: 'polyline', icon: 'polyline', labelKey: 'toolPolyline', tipKey: 'tipPolyline', shortcut: 'P' },
   { name: 'pen', icon: 'pen', labelKey: 'toolPen', tipKey: 'tipPen', shortcut: 'B' },
   { name: 'brush', icon: 'brush', labelKey: 'toolBrush', tipKey: 'tipBrush', shortcut: 'W' },
@@ -85,12 +87,21 @@ function iconBtn(
   return `<button type="button" class="${btnIcon}" ${attrs} aria-label="${escapeAttr(label)}" aria-pressed="${pressed}" data-label="${escapeAttr(label)}" data-body="${escapeAttr(body)}">${icon}</button>`
 }
 
-export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore): () => void {
+export function mountToolRail(
+  el: HTMLElement,
+  editor: Editor,
+  store: AppStore,
+  menuHandlers: AppMenuHandlers,
+): () => void {
+  let disposeMenu: (() => void) | null = null
+
   const render = () => {
+    disposeMenu?.()
+    disposeMenu = null
     const { tool } = store.get()
 
     const toolBtns = TOOLS.map((def) => {
-      const label = `${t(def.labelKey)} (${def.shortcut})`
+      const label = def.shortcut ? `${t(def.labelKey)} (${def.shortcut})` : t(def.labelKey)
       return iconBtn(
         `data-tool="${def.name}"`,
         ICONS[def.icon],
@@ -102,7 +113,17 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
 
     el.innerHTML = `
       <div class="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto px-2 py-3">
-        <div class="mb-2 grid h-10 w-10 place-items-center rounded-xl bg-brand shadow-sm shadow-brand/30" title="${escapeAttr(t('appTitle'))}" aria-hidden="true">${LOGO}</div>
+        <button
+          type="button"
+          id="rail-app-menu"
+          class="mb-2 grid h-10 w-10 place-items-center rounded-xl bg-brand shadow-sm shadow-brand/30 outline-none ring-brand/40 transition hover:ring-2 focus-visible:ring-2"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          aria-label="${escapeAttr(t('appMenu'))}"
+          title="${escapeAttr(t('appMenu'))}"
+          data-label="${escapeAttr(t('appMenu'))}"
+          data-body="${escapeAttr(t('appTitle'))}"
+        >${LOGO}</button>
         <div class="mb-1 h-px w-7 bg-neutral-300"></div>
         ${toolBtns}
         <div class="my-1 h-px w-7 bg-neutral-300"></div>
@@ -115,6 +136,11 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
       const body = btn.dataset.body ?? ''
       if (label) bindTooltip(btn, label, body)
     })
+
+    const menuBtn = el.querySelector<HTMLButtonElement>('#rail-app-menu')
+    if (menuBtn) {
+      disposeMenu = bindAppMenu(menuBtn, editor, store, menuHandlers)
+    }
 
     el.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -131,5 +157,9 @@ export function mountToolRail(el: HTMLElement, editor: Editor, store: AppStore):
     })
   }
 
-  return store.subscribeKeys(['tool', 'localeTick'], render)
+  const unsub = store.subscribeKeys(['tool', 'localeTick'], render)
+  return () => {
+    disposeMenu?.()
+    unsub()
+  }
 }

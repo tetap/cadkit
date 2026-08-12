@@ -21,28 +21,33 @@ import {
   resolveWorldMatrix,
 } from '@cadkit/geometry'
 
-/** Engrave strategy for GRBL / G-code export (not used for canvas rendering). */
-export type LayerEngraveMode = 'line' | 'fill'
+/**
+ * Layer strategy:
+ * - `line` / `fill`: vector engraver modes (G-code + canvas paint)
+ * - `image`: raster-only layer (no line/fill coupling)
+ */
+export type LayerEngraveMode = 'line' | 'fill' | 'image'
 
 /** Fill path styles when `engraveMode === 'fill'`. */
-export type LayerFillStyle =
-  | 'bidirectional'
-  | 'crossHatch'
-  | 'shapesIndividually'
-  | 'offset'
+export type LayerFillStyle = 'bidirectional' | 'crossHatch'
 
 /**
  * Per-layer GRBL / G-code machining parameters.
  * Stored on the layer only — entities do not carry their own G-code settings.
  */
 export interface LayerGcodeParams {
-  /** Line engrave (stroke) vs fill engrave (hatch). */
+  /** Line / fill engraver, or dedicated image layer. */
   mode: LayerEngraveMode
   /** Hatch spacing in document units (mm). Only for fill mode. */
   lineSpacing: number
   /** Hatch / fill path style. Only for fill mode. */
   fillStyle: LayerFillStyle
-  /** Laser power (S-word), typically 0–1000. */
+  /**
+   * Hatch angle in degrees (0 = horizontal). Cross-hatch adds a second pass at +90°.
+   * Only for fill mode.
+   */
+  fillAngle: number
+  /** Laser power (S-word). Unclamped — firmware range varies. */
   power: number
   /** Feed rate in mm/min (F-word). */
   speed: number
@@ -54,30 +59,58 @@ export const DEFAULT_LAYER_GCODE: LayerGcodeParams = {
   mode: 'line',
   lineSpacing: 0.1,
   fillStyle: 'bidirectional',
+  fillAngle: 0,
   power: 500,
   speed: 1000,
   passes: 1,
 }
 
-const FILL_STYLE_SET = new Set<LayerFillStyle>([
-  'bidirectional',
-  'crossHatch',
-  'shapesIndividually',
-  'offset',
-])
+const FILL_STYLE_SET = new Set<LayerFillStyle>(['bidirectional', 'crossHatch'])
+
+function normalizeFillAngle(deg: unknown): number {
+  if (!Number.isFinite(deg as number)) return DEFAULT_LAYER_GCODE.fillAngle
+  // Normalize to [0, 180) — 180° is the same hatch family as 0°.
+  let a = (deg as number) % 180
+  if (a < 0) a += 180
+  if (a >= 180 - 1e-9) a = 0
+  return a
+}
 
 export function resolveLayerGcode(layer: Layer | undefined | null): LayerGcodeParams {
   const g = layer?.gcode
+  const rawStyle = g?.fillStyle as string | undefined
+  const fillStyle: LayerFillStyle =
+    rawStyle && FILL_STYLE_SET.has(rawStyle as LayerFillStyle)
+      ? (rawStyle as LayerFillStyle)
+      : DEFAULT_LAYER_GCODE.fillStyle
+  const mode: LayerEngraveMode =
+    g?.mode === 'fill' ? 'fill' : g?.mode === 'image' ? 'image' : 'line'
   return {
     ...DEFAULT_LAYER_GCODE,
     ...g,
-    mode: g?.mode === 'fill' ? 'fill' : 'line',
-    fillStyle: g?.fillStyle && FILL_STYLE_SET.has(g.fillStyle) ? g.fillStyle : DEFAULT_LAYER_GCODE.fillStyle,
+    mode,
+    fillStyle,
+    fillAngle: normalizeFillAngle(g?.fillAngle),
     lineSpacing: Number.isFinite(g?.lineSpacing) ? Math.max(1e-4, g!.lineSpacing) : DEFAULT_LAYER_GCODE.lineSpacing,
-    power: Number.isFinite(g?.power) ? Math.max(0, g!.power) : DEFAULT_LAYER_GCODE.power,
+    power: Number.isFinite(g?.power) ? g!.power : DEFAULT_LAYER_GCODE.power,
     speed: Number.isFinite(g?.speed) ? Math.max(1, g!.speed) : DEFAULT_LAYER_GCODE.speed,
     passes: Number.isFinite(g?.passes) ? Math.max(1, Math.round(g!.passes)) : DEFAULT_LAYER_GCODE.passes,
   }
+}
+
+export function isImageLayer(layer: Layer | undefined | null): boolean {
+  return resolveLayerGcode(layer).mode === 'image'
+}
+
+/** Whether an entity may live on the given layer (image layers are raster-only). */
+export function layerAcceptsEntity(
+  layer: Layer | undefined | null,
+  entity: { type: string },
+): boolean {
+  const imageLayer = isImageLayer(layer)
+  if (entity.type === 'image') return imageLayer
+  if (entity.type === 'group') return !imageLayer
+  return !imageLayer
 }
 
 export interface Layer {
@@ -86,8 +119,53 @@ export interface Layer {
   visible: boolean
   locked: boolean
   color?: string
-  /** GRBL / G-code params for this layer (export only; ignored by renderer). */
+  /**
+   * Engraver / G-code params. `mode` also controls canvas paint:
+   * line → stroke only; fill → fill only.
+   */
   gcode?: LayerGcodeParams
+}
+
+export interface LayerAwarePaint {
+  stroke: string
+  fill?: string
+  strokeWidth: number
+}
+
+/**
+ * Resolve entity stroke/fill for display, honoring the layer engraver mode:
+ * - `line`: keep stroke, drop fill
+ * - `fill`: keep/create fill, drop stroke
+ * - `image`: leave style as-is (rasters are not recolored by engraver mode)
+ */
+export function resolveLayerAwarePaint(
+  layer: Layer | undefined | null,
+  style: { stroke?: string; fill?: string; strokeWidth?: number },
+): LayerAwarePaint {
+  const stroke = style.stroke ?? layer?.color ?? '#32cd79'
+  const strokeWidth = style.strokeWidth ?? 1
+  const rawFill = style.fill
+  const hasFill =
+    !!rawFill &&
+    rawFill !== 'none' &&
+    rawFill !== 'transparent' &&
+    !/00$/i.test(rawFill)
+  const fill =
+    hasFill || rawFill === undefined
+      ? (rawFill ?? (layer?.color ? layerFillFromStroke(layer.color) : undefined))
+      : rawFill
+
+  const mode = resolveLayerGcode(layer).mode
+  if (mode === 'image') {
+    return { stroke, fill: rawFill, strokeWidth }
+  }
+  if (mode === 'line') {
+    return { stroke, fill: undefined, strokeWidth }
+  }
+
+  // Fill mode: ignore stroke; ensure a solid fill from entity fill or stroke/layer tint.
+  const fillColor = hasFill && rawFill ? rawFill : layerFillFromStroke(stroke)
+  return { stroke: 'none', fill: fillColor, strokeWidth }
 }
 
 export interface DocumentChange {
@@ -104,6 +182,8 @@ export interface SerializedDocument {
   tolerance: number
   layers: Layer[]
   entities: Entity[]
+  /** Per-layer stack order: index 0 = front. Omitted in older files. */
+  entityOrder?: Record<string, EntityId[]>
 }
 
 function emptyChange(): DocumentChange {
@@ -153,6 +233,10 @@ export class CadDocument {
   private readonly layers = new Map<LayerId, Layer>()
   /** Stable stack order: index 0 = top of the layers panel / drawn last (front). */
   private layerOrder: LayerId[] = []
+  /** Per-layer entity stack: index 0 = front (drawn last / picked first). */
+  private readonly entityOrder = new Map<LayerId, EntityId[]>()
+  /** O(1) stack index within a layer (mirrors entityOrder). */
+  private readonly entityStackIndex = new Map<EntityId, number>()
   private readonly boundsCache = new Map<EntityId, AABB>()
   private documentBoundsCache: AABB | null = null
   private version = 0
@@ -169,6 +253,7 @@ export class CadDocument {
       color: '#32cd79',
     })
     this.layerOrder = [this.defaultLayerId]
+    this.entityOrder.set(this.defaultLayerId, [])
   }
 
   getConfig(): DocumentConfig {
@@ -219,10 +304,184 @@ export class CadDocument {
       color: input?.color ?? nextLayerColor(this.layers.size),
     }
     this.layers.set(id, layer)
+    this.entityOrder.set(id, [])
     // New layers appear at the front of the stack.
     this.layerOrder.unshift(id)
     this.version++
     return layer
+  }
+
+  /** Front-to-back entity ids on a layer (index 0 = front). */
+  getEntityOrder(layerId: LayerId): EntityId[] {
+    return [...(this.entityOrder.get(layerId) ?? [])]
+  }
+
+  /** Entity count on a layer's stack (O(1)). */
+  getEntityOrderCount(layerId: LayerId): number {
+    return this.entityOrder.get(layerId)?.length ?? 0
+  }
+
+  /** Index within the layer stack, or -1. Lower index = closer to front. O(1). */
+  getEntityStackIndex(id: EntityId): number {
+    return this.entityStackIndex.get(id) ?? -1
+  }
+
+  private reindexLayerOrder(layerId: LayerId): void {
+    const list = this.entityOrder.get(layerId)
+    if (!list) return
+    for (let i = 0; i < list.length; i++) this.entityStackIndex.set(list[i]!, i)
+  }
+
+  private setLayerOrder(layerId: LayerId, next: EntityId[]): void {
+    this.entityOrder.set(layerId, next)
+    this.reindexLayerOrder(layerId)
+  }
+
+  /**
+   * Reorder entities on one layer. `orderedIds` is front-to-back; extras ignored;
+   * missing ids keep relative order at the end.
+   */
+  reorderEntitiesInLayer(layerId: LayerId, orderedIds: readonly EntityId[]): EntityId[] {
+    if (!this.layers.has(layerId)) return []
+    const current = this.entityOrder.get(layerId) ?? []
+    const allowed = new Set(current)
+    const seen = new Set<EntityId>()
+    const next: EntityId[] = []
+    for (const id of orderedIds) {
+      if (!allowed.has(id) || seen.has(id)) continue
+      seen.add(id)
+      next.push(id)
+    }
+    for (const id of current) {
+      if (!seen.has(id)) next.push(id)
+    }
+    const same = next.length === current.length && next.every((id, i) => id === current[i])
+    if (!same) {
+      this.setLayerOrder(layerId, next)
+      this.version++
+    }
+    return [...next]
+  }
+
+  /** Snapshot of every layer's entity stack (for undo). */
+  getEntityOrderSnapshot(): Record<string, EntityId[]> {
+    const out: Record<string, EntityId[]> = {}
+    for (const [layerId, ids] of this.entityOrder) out[layerId] = [...ids]
+    return out
+  }
+
+  /** Restore a full entity-order snapshot (undo / JSON load). */
+  restoreEntityOrderSnapshot(snapshot: Record<string, EntityId[]>): void {
+    for (const layerId of this.layers.keys()) {
+      const raw = snapshot[layerId] ?? []
+      const existing = new Set(
+        [...this.entities.values()].filter((e) => e.layerId === layerId).map((e) => e.id),
+      )
+      const seen = new Set<EntityId>()
+      const next: EntityId[] = []
+      for (const id of raw) {
+        if (!existing.has(id) || seen.has(id)) continue
+        seen.add(id)
+        next.push(id)
+      }
+      for (const id of existing) {
+        if (!seen.has(id)) next.push(id)
+      }
+      this.setLayerOrder(layerId, next)
+    }
+    this.version++
+  }
+
+  bringToFront(ids: readonly EntityId[]): boolean {
+    return this.moveStackBlock(ids, 'front')
+  }
+
+  sendToBack(ids: readonly EntityId[]): boolean {
+    return this.moveStackBlock(ids, 'back')
+  }
+
+  bringForward(ids: readonly EntityId[]): boolean {
+    return this.moveStackBlock(ids, 'forward')
+  }
+
+  sendBackward(ids: readonly EntityId[]): boolean {
+    return this.moveStackBlock(ids, 'backward')
+  }
+
+  private moveStackBlock(
+    ids: readonly EntityId[],
+    mode: 'front' | 'back' | 'forward' | 'backward',
+  ): boolean {
+    const byLayer = new Map<LayerId, EntityId[]>()
+    for (const id of ids) {
+      const e = this.entities.get(id)
+      if (!e) continue
+      const list = byLayer.get(e.layerId) ?? []
+      list.push(id)
+      byLayer.set(e.layerId, list)
+    }
+    let changed = false
+    for (const [layerId, selectedList] of byLayer) {
+      const order = this.entityOrder.get(layerId) ?? []
+      if (!order.length) continue
+      const selected = new Set(selectedList.filter((id) => order.includes(id)))
+      if (!selected.size) continue
+      const block = order.filter((id) => selected.has(id))
+      const rest = order.filter((id) => !selected.has(id))
+      const minIdx = order.findIndex((id) => selected.has(id))
+      let insertAt = minIdx
+      if (mode === 'front') insertAt = 0
+      else if (mode === 'back') insertAt = rest.length
+      else if (mode === 'forward') insertAt = Math.max(0, minIdx - 1)
+      else insertAt = Math.min(rest.length, minIdx + 1)
+      const next = [...rest.slice(0, insertAt), ...block, ...rest.slice(insertAt)]
+      if (next.every((id, i) => id === order[i])) continue
+      this.setLayerOrder(layerId, next)
+      changed = true
+    }
+    if (changed) this.version++
+    return changed
+  }
+
+  private insertEntityFront(layerId: LayerId, id: EntityId): void {
+    let list = this.entityOrder.get(layerId)
+    if (!list) {
+      list = []
+      this.entityOrder.set(layerId, list)
+    }
+    const idx = list.indexOf(id)
+    if (idx >= 0) list.splice(idx, 1)
+    list.unshift(id)
+    this.reindexLayerOrder(layerId)
+  }
+
+  private removeEntityFromOrder(id: EntityId, layerId?: LayerId): void {
+    if (layerId) {
+      const list = this.entityOrder.get(layerId)
+      if (!list) return
+      const idx = list.indexOf(id)
+      if (idx >= 0) {
+        list.splice(idx, 1)
+        this.entityStackIndex.delete(id)
+        this.reindexLayerOrder(layerId)
+      }
+      return
+    }
+    for (const [lid, list] of this.entityOrder) {
+      const idx = list.indexOf(id)
+      if (idx >= 0) {
+        list.splice(idx, 1)
+        this.entityStackIndex.delete(id)
+        this.reindexLayerOrder(lid)
+        return
+      }
+    }
+  }
+
+  private moveEntityOrderToLayer(id: EntityId, fromLayer: LayerId, toLayer: LayerId): void {
+    if (fromLayer === toLayer) return
+    this.removeEntityFromOrder(id, fromLayer)
+    this.insertEntityFront(toLayer, id)
   }
 
   /**
@@ -271,24 +530,66 @@ export class CadDocument {
   }
 
   /**
-   * Remove a layer. Entities on it move to `fallbackId` (default layer).
-   * The last remaining layer cannot be removed.
+   * Remove a layer. Entities move to a compatible fallback (image → image layer,
+   * vectors → line/fill layer). Refuses to delete the last image layer while it
+   * still holds images. The last remaining layer cannot be removed.
    */
   removeLayer(id: LayerId, fallbackId?: LayerId): boolean {
     if (!this.layers.has(id) || this.layers.size <= 1) return false
-    const dest =
-      fallbackId && this.layers.has(fallbackId) && fallbackId !== id
-        ? fallbackId
-        : [...this.layers.keys()].find((lid) => lid !== id)
-    if (!dest) return false
-    for (const entity of this.entities.values()) {
-      if (entity.layerId === id) {
-        this.entities.set(entity.id, { ...entity, layerId: dest, version: entity.version + 1 })
-      }
+    const removing = this.layers.get(id)!
+    const others = [...this.layers.entries()].filter(([lid]) => lid !== id)
+    const hasImages = [...this.entities.values()].some(
+      (e) => e.layerId === id && e.type === 'image',
+    )
+    if (isImageLayer(removing) && hasImages && !others.some(([, l]) => isImageLayer(l))) {
+      return false
     }
+
+    const preferred =
+      fallbackId && this.layers.has(fallbackId) && fallbackId !== id ? fallbackId : null
+    const vectorDest =
+      (preferred && !isImageLayer(this.layers.get(preferred)) ? preferred : null) ??
+      others.find(([, l]) => !isImageLayer(l))?.[0] ??
+      others[0]?.[0]
+    const imageDest =
+      (preferred && isImageLayer(this.layers.get(preferred)) ? preferred : null) ??
+      others.find(([, l]) => isImageLayer(l))?.[0] ??
+      vectorDest
+    if (!vectorDest || !imageDest) return false
+
+    const moving = this.entityOrder.get(id) ?? []
+    const byDest = new Map<LayerId, EntityId[]>()
+    for (const eid of moving) {
+      const entity = this.entities.get(eid)
+      if (!entity) continue
+      const dest = entity.type === 'image' ? imageDest : vectorDest
+      this.entities.set(entity.id, { ...entity, layerId: dest, version: entity.version + 1 })
+      const list = byDest.get(dest) ?? []
+      list.push(eid)
+      byDest.set(dest, list)
+    }
+    // Also catch entities that were on the layer but missing from order.
+    for (const entity of this.entities.values()) {
+      if (entity.layerId !== id) continue
+      const dest = entity.type === 'image' ? imageDest : vectorDest
+      this.entities.set(entity.id, { ...entity, layerId: dest, version: entity.version + 1 })
+      const list = byDest.get(dest) ?? []
+      if (!list.includes(entity.id)) list.push(entity.id)
+      byDest.set(dest, list)
+    }
+
+    for (const [dest, ids] of byDest) {
+      const destOrder = [...(this.entityOrder.get(dest) ?? [])]
+      const movingSet = new Set(ids)
+      const kept = destOrder.filter((eid) => !movingSet.has(eid))
+      this.setLayerOrder(dest, [...ids, ...kept])
+    }
+    this.entityOrder.delete(id)
     this.layers.delete(id)
     this.layerOrder = this.layerOrder.filter((lid) => lid !== id)
-    if (this.defaultLayerId === id) this.defaultLayerId = dest
+    if (this.defaultLayerId === id) {
+      this.defaultLayerId = vectorDest
+    }
     this.version++
     this.invalidateDocumentBounds()
     return true
@@ -376,6 +677,7 @@ export class CadDocument {
     if (!entity.layerId) entity.layerId = this.defaultLayerId
     const before = emptyAABB()
     this.entities.set(entity.id, entity)
+    this.insertEntityFront(entity.layerId, entity.id)
     if (entity.parentId) this.attachToParent(entity.id, entity.parentId as EntityId)
     const after = this.computeWorldBounds(entity)
     this.boundsCache.set(entity.id, after)
@@ -395,12 +697,25 @@ export class CadDocument {
   addMany(entities: Entity[]): DocumentChange {
     const change = emptyChange()
     if (entities.length === 0) return change
+    const prependByLayer = new Map<LayerId, EntityId[]>()
     for (const entity of entities) {
       if (!entity.layerId) entity.layerId = this.defaultLayerId
       const before = emptyAABB()
       this.entities.set(entity.id, entity)
+      const bucket = prependByLayer.get(entity.layerId) ?? []
+      bucket.push(entity.id)
+      prependByLayer.set(entity.layerId, bucket)
       change.added.push(entity.id)
       change.beforeBounds.set(entity.id, before)
+    }
+    // One splice per layer: last-in-batch becomes front (matches repeated unshift).
+    for (const [layerId, ids] of prependByLayer) {
+      const existing = this.entityOrder.get(layerId) ?? []
+      const incoming = new Set(ids)
+      const kept = existing.filter((id) => !incoming.has(id))
+      const block: EntityId[] = []
+      for (let i = ids.length - 1; i >= 0; i--) block.push(ids[i]!)
+      this.setLayerOrder(layerId, [...block, ...kept])
     }
     // Second pass: parent links + bounds (parents may appear later in the list)
     for (const entity of entities) {
@@ -423,6 +738,10 @@ export class CadDocument {
     const prev = this.entities.get(entity.id)
     const before = this.boundsCache.get(entity.id) ?? emptyAABB()
     this.entities.set(entity.id, structuredClone(entity))
+    if (!prev) this.insertEntityFront(entity.layerId, entity.id)
+    else if (prev.layerId !== entity.layerId) {
+      this.moveEntityOrderToLayer(entity.id, prev.layerId, entity.layerId)
+    }
     const after = this.computeWorldBounds(entity)
     this.boundsCache.set(entity.id, after)
     if (entity.parentId) this.recomputeGroupBounds(entity.parentId as EntityId)
@@ -447,8 +766,18 @@ export class CadDocument {
     const prev = this.entities.get(id)
     if (!prev) return null
     const before = this.boundsCache.get(id) ?? emptyAABB()
-    const next = { ...prev, ...patch, id: prev.id, type: prev.type, version: prev.version + 1 } as Entity
+    // Allow explicit type changes (e.g. circle → arc via start/end handles).
+    const next = {
+      ...prev,
+      ...patch,
+      id: prev.id,
+      type: (patch as { type?: Entity['type'] }).type ?? prev.type,
+      version: prev.version + 1,
+    } as Entity
     this.entities.set(id, next)
+    if (patch.layerId && patch.layerId !== prev.layerId) {
+      this.moveEntityOrderToLayer(id, prev.layerId, patch.layerId)
+    }
     const after = this.computeWorldBounds(next)
     this.boundsCache.set(id, after)
     const updated = [id]
@@ -515,6 +844,7 @@ export class CadDocument {
     }
     const before = this.boundsCache.get(id) ?? emptyAABB()
     const parentChange = this.detachFromParent(id, prev.parentId as EntityId | undefined)
+    this.removeEntityFromOrder(id, prev.layerId)
     this.entities.delete(id)
     this.boundsCache.delete(id)
     this.version++
@@ -552,6 +882,8 @@ export class CadDocument {
     const parentChange = this.detachFromParent(id, root.parentId as EntityId | undefined)
 
     for (const eid of removed) {
+      const e = this.entities.get(eid)
+      if (e) this.removeEntityFromOrder(eid, e.layerId)
       this.entities.delete(eid)
       this.boundsCache.delete(eid)
     }
@@ -579,6 +911,8 @@ export class CadDocument {
   clearEntities(): void {
     this.entities.clear()
     this.boundsCache.clear()
+    this.entityStackIndex.clear()
+    for (const layerId of this.entityOrder.keys()) this.entityOrder.set(layerId, [])
     this.invalidateDocumentBounds()
     this.version++
   }
@@ -706,6 +1040,7 @@ export class CadDocument {
       tolerance: this.config.tolerance,
       layers: this.getLayers(),
       entities: this.getEntities(),
+      entityOrder: this.getEntityOrderSnapshot(),
     }
   }
 
@@ -717,13 +1052,28 @@ export class CadDocument {
     })
     doc.layers.clear()
     doc.layerOrder = []
+    doc.entityOrder.clear()
     for (const layer of data.layers) {
       doc.layers.set(layer.id, layer)
       doc.layerOrder.push(layer.id)
+      doc.entityOrder.set(layer.id, [])
     }
     if (data.layers[0]) doc.defaultLayerId = data.layers[0].id
     else if (doc.layerOrder[0]) doc.defaultLayerId = doc.layerOrder[0]!
     doc.addMany(data.entities)
+    if (data.entityOrder) {
+      doc.restoreEntityOrderSnapshot(data.entityOrder)
+    } else {
+      // Legacy: entities array order per layer = front → back.
+      const legacy: Record<string, EntityId[]> = {}
+      for (const layerId of doc.layerOrder) legacy[layerId] = []
+      for (const e of data.entities) {
+        const lid = e.layerId
+        if (!legacy[lid]) legacy[lid] = []
+        legacy[lid]!.push(e.id)
+      }
+      doc.restoreEntityOrderSnapshot(legacy)
+    }
     return doc
   }
 

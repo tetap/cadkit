@@ -27,6 +27,7 @@ export default defineConfig({
       '@cadkit/text': pkg('text'),
       '@cadkit/io-svg': pkg('io-svg'),
       '@cadkit/io-dxf': pkg('io-dxf'),
+      '@cadkit/io-gcode': pkg('io-gcode'),
       '@cadkit/platform-web': pkg('platform-web'),
       '@cadkit/worker-runtime': pkg('worker-runtime'),
       '@cadkit/wasm': pkg('wasm'),

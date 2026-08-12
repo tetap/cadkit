@@ -14,9 +14,11 @@ export class HandleOverlay {
   private readonly guidesLayer: HTMLDivElement
   private readonly arcGuideEl: HTMLDivElement
   private readonly handlePool: HTMLDivElement[] = []
+  private readonly handleLabelPool: HTMLDivElement[] = []
   private readonly guidePool: HTMLDivElement[] = []
   private readonly labelPool: HTMLDivElement[] = []
   private activeHandles = 0
+  private activeHandleLabels = 0
   private activeGuides = 0
   private activeLabels = 0
 
@@ -95,7 +97,7 @@ export class HandleOverlay {
       position: 'absolute',
       display: 'none',
       boxSizing: 'border-box',
-      border: '1.5px solid rgba(37, 99, 235, 0.28)',
+      border: '1.5px solid rgba(239, 68, 68, 0.55)',
       borderRadius: '50%',
       background: 'transparent',
       pointerEvents: 'none',
@@ -124,6 +126,7 @@ export class HandleOverlay {
     this.updateSelectionFrame(selectionFrame, handles, camera, canvasOffset, frameRotation)
     this.updateArcGuide(handles, camera, canvasOffset)
     let i = 0
+    let li = 0
     for (const h of handles) {
       const el = this.acquireHandle(i++)
       const s = camera.worldToScreen(h.world)
@@ -135,13 +138,15 @@ export class HandleOverlay {
           ? 18
           : appearance === 'arc-center'
             ? 14
-            : isRotate
-              ? 9
-              : isScale
-                ? 8
-                : h.kind === 'radius'
+            : appearance === 'shape-param'
+              ? 10
+              : isRotate
+                ? 9
+                : isScale
                   ? 8
-                  : 7
+                  : h.kind === 'radius'
+                    ? 8
+                    : 7
       el.style.display = 'grid'
       el.style.placeItems = 'center'
       el.style.left = `${canvasOffset.left + s.x - size / 2}px`
@@ -175,6 +180,23 @@ export class HandleOverlay {
         el.textContent = '＋'
         el.style.fontSize = '12px'
         el.style.color = '#2563eb'
+      } else if (appearance === 'shape-param') {
+        el.style.border = '1.5px solid #2563eb'
+        el.style.background = '#fff'
+        el.style.borderRadius = '50%'
+        el.textContent = h.kind === 'center' ? '＋' : ''
+        el.style.fontSize = '11px'
+      } else if (appearance === 'corner-radius') {
+        el.style.border = '1.5px solid #94a3b8'
+        el.style.background = '#fff'
+        el.style.borderRadius = '50%'
+        el.textContent = ''
+      } else if (appearance === 'star-tips') {
+        el.style.border = '1.5px solid #2563eb'
+        el.style.background = '#fff'
+        el.style.borderRadius = '50%'
+        el.textContent = '✦'
+        el.style.fontSize = '11px'
       } else {
         el.textContent = ''
         el.style.border = '1.5px solid #2563eb'
@@ -185,11 +207,22 @@ export class HandleOverlay {
           el.style.boxShadow = '0 0 0 2px rgba(37, 99, 235, 0.25)'
         }
       }
+      if (h.label) {
+        const badge = this.acquireHandleLabel(li++)
+        badge.style.display = 'block'
+        badge.textContent = h.label
+        badge.style.left = `${canvasOffset.left + s.x + size / 2 + 6}px`
+        badge.style.top = `${canvasOffset.top + s.y - 10}px`
+      }
     }
     for (let j = i; j < this.activeHandles; j++) {
       this.handlePool[j]!.style.display = 'none'
     }
+    for (let j = li; j < this.activeHandleLabels; j++) {
+      this.handleLabelPool[j]!.style.display = 'none'
+    }
     this.activeHandles = Math.max(this.activeHandles, i)
+    this.activeHandleLabels = Math.max(this.activeHandleLabels, li)
   }
 
   private updateArcGuide(
@@ -413,8 +446,34 @@ export class HandleOverlay {
     return el
   }
 
+  private acquireHandleLabel(index: number): HTMLDivElement {
+    let el = this.handleLabelPool[index]
+    if (!el) {
+      el = document.createElement('div')
+      Object.assign(el.style, {
+        position: 'absolute',
+        display: 'none',
+        pointerEvents: 'none',
+        padding: '2px 6px',
+        borderRadius: '4px',
+        background: '#2563eb',
+        color: '#fff',
+        fontSize: '11px',
+        fontWeight: '600',
+        fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+        lineHeight: '1.2',
+        whiteSpace: 'nowrap',
+        boxShadow: '0 1px 2px rgba(15, 23, 42, 0.25)',
+      } as Partial<CSSStyleDeclaration>)
+      this.handleLabelPool[index] = el
+      this.handlesLayer.appendChild(el)
+    }
+    return el
+  }
+
   clear(): void {
     for (const el of this.handlePool) el.style.display = 'none'
+    for (const el of this.handleLabelPool) el.style.display = 'none'
     for (const el of this.guidePool) el.style.display = 'none'
     for (const el of this.labelPool) el.style.display = 'none'
     this.hoverEl.style.display = 'none'

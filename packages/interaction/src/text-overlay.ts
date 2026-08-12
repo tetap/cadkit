@@ -1,13 +1,17 @@
+import { resolveLayerAwarePaint, resolveLayerGcode, type Layer } from '@cadkit/document'
 import {
   arcTextLocalBounds,
   layoutArcText,
   measureTextAdvance,
+  textEntityToLocalOutlines,
   type Camera2D,
 } from '@cadkit/geometry'
-import type { Entity, EntityId, ScreenPoint, TextArcPath, TextEntity } from '@cadkit/types'
+import type { Entity, EntityId, LayerId, ScreenPoint, TextArcPath, TextEntity } from '@cadkit/types'
 
 export interface TextDraftState {
   entityId: EntityId | null
+  /** Layer used for engraver-mode paint (line = stroke / fill = fill). */
+  layerId?: LayerId
   content: string
   /** Caret / selection end (insertion point). */
   caret: number
@@ -54,6 +58,9 @@ function makeGlyphSpan(): HTMLSpanElement {
     top: '0',
     whiteSpace: 'pre',
     lineHeight: '1',
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'center',
     // Origin at top-left so `translate(x,y) rotate translate(-50%,-100%)`
     // puts the em-box bottom-center on the layout pose (matches arcTextLocalBounds).
     transformOrigin: '0 0',
@@ -73,7 +80,10 @@ function firstTextNode(el: HTMLElement): Text | null {
   return walk(el)
 }
 
-/** DOM labels for TextEntity so typed content is visible without waiting on GPU atlas. */
+/**
+ * DOM layer for the *live text draft* only (IME caret / selection / typing preview).
+ * Committed TextEntity glyphs are vector outlines in the WebGPU scene — not DOM.
+ */
 export class TextOverlay {
   readonly root: HTMLDivElement
   private readonly pool = new Map<EntityId, HTMLDivElement>()
@@ -82,6 +92,7 @@ export class TextOverlay {
   private selLayer: HTMLDivElement | null = null
   private draft: TextDraftState | null = null
   private editingId: EntityId | null = null
+  private getLayer: ((id: LayerId) => Layer | undefined) | null = null
 
   constructor(host: HTMLElement) {
     this.root = document.createElement('div')
@@ -146,7 +157,10 @@ export class TextOverlay {
     }
     if (this.draftEl && this.draftEl.style.display !== 'none') {
       const rootRect = this.root.getBoundingClientRect()
-      const r = this.draftEl.getBoundingClientRect()
+      const measure = this.draftEl.querySelector(
+        '[data-cadkit-text-measure]',
+      ) as HTMLElement | null
+      const r = (measure ?? this.draftEl).getBoundingClientRect()
       if (r.width > 0 || r.height > 0) {
         const x = rootRect.left + screen.x
         const y = rootRect.top + screen.y
@@ -203,26 +217,16 @@ export class TextOverlay {
     return this.straightCaretIndexComputed(screen, camera)
   }
 
-  update(entities: readonly Entity[], camera: Camera2D): void {
-    const seen = new Set<EntityId>()
-    for (const e of entities) {
-      if (e.type !== 'text' || e.style.visible === false) continue
-      if (this.editingId && e.id === this.editingId) {
-        seen.add(e.id)
-        const hidden = this.pool.get(e.id)
-        if (hidden) hidden.style.display = 'none'
-        continue
-      }
-      seen.add(e.id)
-      const el = this.ensureLabel(e.id)
-      this.paintLabel(el, e, camera)
-      el.style.display = 'block'
-    }
-    for (const [id, el] of this.pool) {
-      if (!seen.has(id)) {
-        el.remove()
-        this.pool.delete(id)
-      }
+  update(
+    _entities: readonly Entity[],
+    camera: Camera2D,
+    getLayer?: (id: LayerId) => Layer | undefined,
+  ): void {
+    this.getLayer = getLayer ?? null
+    // Committed text is drawn as GPU vector outlines — clear any legacy DOM labels.
+    if (this.pool.size) {
+      for (const el of this.pool.values()) el.remove()
+      this.pool.clear()
     }
     this.renderDraft(camera)
   }
@@ -271,51 +275,142 @@ export class TextOverlay {
     return el
   }
 
-  private paintLabel(el: HTMLDivElement, e: TextEntity, camera: Camera2D): void {
-    if (e.path?.kind === 'arc') {
-      this.paintArcLabel(el, e, camera)
-      return
-    }
-    this.paintStraightLabel(el, e, camera)
-  }
-
-  private paintStraightLabel(el: HTMLDivElement, e: TextEntity, camera: Camera2D): void {
+  private paintLabel(
+    el: HTMLDivElement,
+    e: TextEntity,
+    camera: Camera2D,
+    layer?: Layer,
+  ): void {
+    // Visual = same glyph outlines as GPU. Invisible measure layer keeps IME caret.
     el.replaceChildren()
     el.removeAttribute('data-arc')
+    el.style.left = '0'
+    el.style.top = '0'
+    el.style.width = '0'
+    el.style.height = '0'
+    el.style.transform = ''
+    el.style.fontSize = ''
+    el.style.webkitTextStroke = ''
+    el.style.color = ''
+    el.style.opacity = String(e.style.opacity ?? 1)
+
+    const paint = resolveLayerAwarePaint(layer, e.style)
+    const mode = resolveLayerGcode(layer).mode
+    const color =
+      mode === 'line'
+        ? paint.stroke || '#111827'
+        : paint.fill || paint.stroke || '#111827'
+
+    this.appendOutlineSvg(el, e, camera, color, mode === 'line')
+
+    if (e.path?.kind === 'arc') {
+      el.setAttribute('data-arc', '1')
+      this.appendInvisibleArcMeasure(el, e, camera)
+    } else {
+      this.appendInvisibleStraightMeasure(el, e, camera)
+    }
+  }
+
+  /** Screen-space SVG paths from `textEntityToLocalOutlines` (GPU-parity draft). */
+  private appendOutlineSvg(
+    el: HTMLDivElement,
+    e: TextEntity,
+    camera: Camera2D,
+    color: string,
+    strokeOnly: boolean,
+  ): void {
+    const outlines = textEntityToLocalOutlines(e)
+    if (!outlines.length) return
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('data-cadkit-text-outlines', '1')
+    Object.assign(svg.style, {
+      position: 'absolute',
+      left: '0',
+      top: '0',
+      overflow: 'visible',
+      pointerEvents: 'none',
+    } as Partial<CSSStyleDeclaration>)
+    svg.setAttribute('width', '1')
+    svg.setAttribute('height', '1')
+
+    let d = ''
+    for (const contour of outlines) {
+      const pts = contour.points
+      if (pts.length < 2) continue
+      for (let i = 0; i < pts.length; i++) {
+        const s = camera.worldToScreen({
+          x: pts[i]!.x,
+          y: pts[i]!.y,
+          __space: 'world',
+        })
+        d += `${i === 0 ? 'M' : 'L'}${s.x} ${s.y}`
+      }
+      d += 'Z'
+    }
+    if (!d) return
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', d)
+    if (strokeOnly) {
+      path.setAttribute('fill', 'none')
+      path.setAttribute('stroke', color)
+      path.setAttribute('stroke-width', '1')
+      path.setAttribute('vector-effect', 'non-scaling-stroke')
+    } else {
+      path.setAttribute('fill', color)
+      path.setAttribute('fill-rule', 'evenodd')
+      path.setAttribute('stroke', 'none')
+    }
+    svg.appendChild(path)
+    el.appendChild(svg)
+  }
+
+  /** Transparent DOM text for caret / selection metrics (not painted). */
+  private appendInvisibleStraightMeasure(
+    el: HTMLDivElement,
+    e: TextEntity,
+    camera: Camera2D,
+  ): void {
     const screen = camera.worldToScreen({
       x: e.position.x,
       y: e.position.y,
       __space: 'world',
     })
     const zoom = camera.getState().zoom
-    const color = e.style.fill || e.style.stroke || '#111827'
-    const opacity = e.style.opacity ?? 1
     const wf = e.widthFactor ?? 1
-    // Width in layout px before scaleX — scaleX applies widthFactor visually.
     const naturalW = measureTextAdvance(e.content, e.fontSize, e.fontFamily || 'sans-serif', 1)
-    el.textContent = e.content
-    el.style.left = `${screen.x}px`
-    el.style.top = `${screen.y - e.fontSize * zoom}px`
-    el.style.width = `${Math.max(1, naturalW * zoom)}px`
-    el.style.height = 'auto'
-    el.style.whiteSpace = 'pre'
-    el.style.lineHeight = '1'
-    el.style.fontFamily = e.fontFamily || 'sans-serif'
-    el.style.fontSize = `${Math.max(1, e.fontSize * zoom)}px`
-    el.style.textAlign = e.align ?? 'left'
+    const measure = document.createElement('div')
+    measure.dataset.cadkitTextMeasure = '1'
+    measure.textContent = e.content
+    Object.assign(measure.style, {
+      position: 'absolute',
+      left: `${screen.x}px`,
+      top: `${screen.y - e.fontSize * zoom}px`,
+      width: `${Math.max(1, naturalW * zoom)}px`,
+      height: 'auto',
+      whiteSpace: 'pre',
+      lineHeight: '1',
+      fontFamily: e.fontFamily || 'sans-serif',
+      fontSize: `${Math.max(1, e.fontSize * zoom)}px`,
+      textAlign: e.align ?? 'left',
+      color: 'transparent',
+      opacity: '0',
+      pointerEvents: 'none',
+      userSelect: 'none',
+    } as Partial<CSSStyleDeclaration>)
     const anchorX = e.align === 'center' ? '50%' : e.align === 'right' ? '100%' : '0'
     const translateX = e.align === 'center' ? '-50%' : e.align === 'right' ? '-100%' : '0'
-    el.style.transformOrigin = `${anchorX} 100%`
-    el.style.transform = `translateX(${translateX}) rotate(${e.rotation ?? 0}rad) scaleX(${wf})`
-    el.style.color = color
-    el.style.opacity = String(opacity)
+    measure.style.transformOrigin = `${anchorX} 100%`
+    measure.style.transform = `translateX(${translateX}) rotate(${e.rotation ?? 0}rad) scaleX(${wf})`
+    el.appendChild(measure)
   }
 
-  private paintArcLabel(el: HTMLDivElement, e: TextEntity, camera: Camera2D): void {
+  private appendInvisibleArcMeasure(
+    el: HTMLDivElement,
+    e: TextEntity,
+    camera: Camera2D,
+  ): void {
     const path = e.path!
     const zoom = camera.getState().zoom
-    const color = e.style.fill || e.style.stroke || '#111827'
-    const opacity = e.style.opacity ?? 1
     const poses = layoutArcText(
       e.content,
       e.fontSize,
@@ -324,26 +419,7 @@ export class TextOverlay {
       e.widthFactor ?? 1,
       e.fontFamily || 'sans-serif',
     )
-    el.textContent = ''
-    el.setAttribute('data-arc', '1')
-    el.style.left = '0'
-    el.style.top = '0'
-    el.style.width = '0'
-    el.style.height = '0'
-    el.style.transform = ''
-    el.style.opacity = String(opacity)
-    el.style.color = color
-    el.style.fontFamily = e.fontFamily || 'sans-serif'
-    el.style.fontSize = `${Math.max(1, e.fontSize * zoom)}px`
-
-    const strokeOnly =
-      (!e.style.fill ||
-        e.style.fill === 'none' ||
-        e.style.fill === 'transparent' ||
-        /00$/i.test(e.style.fill)) &&
-      !!e.style.stroke &&
-      e.style.stroke !== 'none'
-
+    const wf = Math.max(1e-6, e.widthFactor ?? 1)
     for (const g of poses) {
       if (g.char === ' ') continue
       const span = makeGlyphSpan()
@@ -351,16 +427,17 @@ export class TextOverlay {
       span.textContent = g.char
       const screen = camera.worldToScreen({ x: g.x, y: g.y, __space: 'world' })
       const deg = (g.rotation * 180) / Math.PI
+      const boxW = Math.max(1, (g.advance / wf) * zoom)
+      const boxH = Math.max(1, e.fontSize * zoom)
       span.style.fontFamily = e.fontFamily || 'sans-serif'
-      span.style.fontSize = `${Math.max(1, e.fontSize * zoom)}px`
-      if (strokeOnly) {
-        span.style.color = 'transparent'
-        span.style.webkitTextStroke = `${Math.max(0.6, 0.9 * zoom)}px ${e.style.stroke}`
-        span.style.paintOrder = 'stroke fill'
-      } else {
-        span.style.color = color
-        span.style.webkitTextStroke = ''
-      }
+      span.style.fontSize = `${boxH}px`
+      span.style.width = `${boxW}px`
+      span.style.height = `${boxH}px`
+      span.style.color = 'transparent'
+      span.style.opacity = '0'
+      span.style.display = 'flex'
+      span.style.alignItems = 'flex-end'
+      span.style.justifyContent = 'center'
       span.style.transform = `translate(${screen.x}px, ${screen.y}px) rotate(${deg}deg) translate(-50%, -100%)`
       el.appendChild(span)
     }
@@ -420,7 +497,7 @@ export class TextOverlay {
     const fake: TextEntity = {
       id: (d.entityId ?? ('draft' as EntityId)) as EntityId,
       type: 'text',
-      layerId: '0' as never,
+      layerId: (d.layerId ?? ('0' as LayerId)) as LayerId,
       style: { fill: d.color, stroke: d.color },
       transform: [1, 0, 0, 1, 0, 0],
       version: 1,
@@ -434,7 +511,12 @@ export class TextOverlay {
       path: d.path,
     }
 
-    this.paintLabel(this.draftEl, fake, camera)
+    this.paintLabel(
+      this.draftEl,
+      fake,
+      camera,
+      d.layerId ? this.getLayer?.(d.layerId) : undefined,
+    )
     this.draftEl.style.display = 'block'
 
     this.renderSelectionHighlight(camera)
@@ -483,12 +565,13 @@ export class TextOverlay {
       )
       const zoom = camera.getState().zoom
       const fontSizePx = this.draft.fontSize * zoom
+      const wf = Math.max(1e-6, this.draft.widthFactor ?? 1)
       for (let i = a; i < b && i < poses.length; i++) {
         const g = poses[i]!
         if (g.char === ' ' || g.char === '\n') continue
         const screen = camera.worldToScreen({ x: g.x, y: g.y, __space: 'world' })
         const box = document.createElement('div')
-        const w = Math.max(4, g.advance * zoom)
+        const w = Math.max(4, (g.advance / wf) * zoom)
         Object.assign(box.style, {
           position: 'absolute',
           left: '0',

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { IDENTITY_TRANSFORM, createEntityId, createLayerId } from '@cadkit/types'
+import {
+  IDENTITY_TRANSFORM,
+  createEntityId,
+  createGroupId,
+  createLayerId,
+  type Entity,
+  type GroupEntity,
+} from '@cadkit/types'
 import { offsetContours, offsetEntities, offsetEntity } from './offset.js'
 
 const layer = createLayerId('0')
@@ -108,5 +115,36 @@ describe('offsetEntities', () => {
     expect(Math.max(...hxs)).toBeLessThan(30)
     expect(Math.min(...hys)).toBeGreaterThan(10)
     expect(Math.max(...hys)).toBeLessThan(30)
+  })
+
+  it('expands group children instead of no-op', () => {
+    const a = squareEntity(0, 0, 10)
+    const b = squareEntity(20, 0, 10)
+    const group: GroupEntity = {
+      id: createEntityId('group'),
+      type: 'group',
+      groupId: createGroupId(),
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      children: [a.id, b.id],
+    }
+    a.parentId = group.id
+    b.parentId = group.id
+    const byId = new Map<string, Entity>([
+      [a.id, a],
+      [b.id, b],
+      [group.id, group],
+    ])
+    const lookup = (id: string) => byId.get(id)
+    const opts = { distance: 2, direction: 'external' as const, join: 'round' as const }
+
+    expect(offsetEntities([group], opts, () => undefined)).toHaveLength(0)
+    const out = offsetEntities([group], opts, lookup)
+    expect(out.length).toBeGreaterThanOrEqual(1)
+    const xs = out.flatMap((c) => c.points.map((p) => p.x))
+    expect(Math.min(...xs)).toBeLessThan(-1)
+    expect(Math.max(...xs)).toBeGreaterThan(31)
   })
 })

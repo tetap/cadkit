@@ -9,6 +9,8 @@ export const ICONS = {
   rectangle: icon('<rect x="4" y="5" width="16" height="14" rx="1.5"/>'),
   ellipse: icon('<ellipse cx="12" cy="12" rx="9" ry="6.5"/>'),
   circle: icon('<circle cx="12" cy="12" r="8.5"/>'),
+  heart: icon('<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 10c0 5.6-7 10-7 10Z"/>'),
+  star: icon('<path d="m12 3 2.4 5.7 6.2.5-4.7 4 1.5 6.1L12 16.2 6.6 19.3l1.5-6.1-4.7-4 6.2-.5L12 3Z"/>'),
   polyline: icon('<path d="m3.5 17 5-10 6 7 6-10"/><circle cx="3.5" cy="17" r="1"/><circle cx="8.5" cy="7" r="1"/><circle cx="14.5" cy="14" r="1"/><circle cx="20.5" cy="4" r="1"/>'),
   pen: icon('<path d="m12 19 7-7 3 3-7 7-4 1 1-4Z"/><path d="m18 13-7-7-8 3 7 7"/><path d="m3 9 4.5 1.5"/><circle cx="9" cy="12" r="1.5"/>'),
   brush: icon('<path d="M4 20c2-1 3-4 4-7s3-5 6-6 5 0 6 2-1 5-3 6-5 2-7 3-5 3-6 2Z"/><path d="m9 11 4 4"/>'),

@@ -3,6 +3,7 @@ import { aabbFromPoints, createAABB, emptyAABB, expandAABB, isValidAABB } from '
 import { arcTextLocalBounds } from './arc-text.js'
 import { type Matrix3, transformPoint } from './matrix.js'
 import { measureTextLine } from './text-metrics.js'
+import { textEntityToLocalOutlines } from './text-outlines.js'
 
 export interface BoundsChange {
   before: AABB
@@ -38,19 +39,8 @@ export function entityLocalBounds(entity: Entity): AABB {
       const ry = entity.radiusY
       return createAABB(entity.center.x - rx, entity.center.y - ry, entity.center.x + rx, entity.center.y + ry)
     }
-    case 'text': {
-      if (entity.path?.kind === 'arc') {
-        return arcTextLocalBounds(
-          entity.content,
-          entity.fontSize,
-          entity.position,
-          entity.path,
-          entity.widthFactor ?? 1,
-          entity.fontFamily,
-        )
-      }
-      return straightTextLocalBounds(entity)
-    }
+    case 'text':
+      return textInkOrEmBounds(entity)
     case 'image':
       return createAABB(
         entity.origin.x,
@@ -74,12 +64,38 @@ export function entityLocalBounds(entity: Entity): AABB {
 }
 
 /**
- * Match TextOverlay: `position` is the first line's em-box bottom (CSS
- * line-height:1, transform-origin at bottom). Y grows downward.
- * Applies the same rotate + scaleX(widthFactor) as the overlay so flipped /
- * rotated text stays inside the selection frame.
+ * Prefer traced glyph ink (matches GPU vector text). Falls back to em-box /
+ * arc layout when canvas or fonts are unavailable.
  */
-function straightTextLocalBounds(entity: Extract<Entity, { type: 'text' }>): AABB {
+function textInkOrEmBounds(entity: Extract<Entity, { type: 'text' }>): AABB {
+  if (entity.content) {
+    const outlines = textEntityToLocalOutlines(entity)
+    if (outlines.length) {
+      const box = emptyAABB()
+      for (const c of outlines) {
+        for (const p of c.points) expandAABB(box, p.x, p.y)
+      }
+      if (isValidAABB(box)) return box
+    }
+  }
+  if (entity.path?.kind === 'arc') {
+    return arcTextLocalBounds(
+      entity.content,
+      entity.fontSize,
+      entity.position,
+      entity.path,
+      entity.widthFactor ?? 1,
+      entity.fontFamily || 'sans-serif',
+    )
+  }
+  return straightTextEmBounds(entity)
+}
+
+/**
+ * Em-box AABB for straight text (baseline at position.y). Corners are rotated
+ * so rotated text stays inside the selection frame when ink is unavailable.
+ */
+function straightTextEmBounds(entity: Extract<Entity, { type: 'text' }>): AABB {
   const fontSize = entity.fontSize
   const fontFamily = entity.fontFamily || 'sans-serif'
   const wf = entity.widthFactor ?? 1

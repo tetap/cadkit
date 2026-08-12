@@ -1,4 +1,5 @@
 import { layerFillFromStroke } from '@cadkit/document'
+import { buildHeartPath, buildStarPath, boxFromCorners } from '@cadkit/geometry'
 import {
   IDENTITY_TRANSFORM,
   createEntityId,
@@ -157,6 +158,70 @@ export class RectangleTool extends DragShapeTool {
         { x: minX, y: maxY },
       ],
       closed: true,
+      shape: { kind: 'rect', cornerRadii: 0 },
+    }
+  }
+}
+
+export class HeartTool extends DragShapeTool {
+  readonly name = 'heart' as const
+
+  protected buildPreview(a: WorldPoint, b: WorldPoint): PreviewPrimitive {
+    const box = boxFromCorners(a, b)
+    return {
+      kind: 'polyline',
+      points: buildHeartPath(box.minX, box.minY, box.maxX, box.maxY).map((p) =>
+        worldPoint(p.x, p.y),
+      ),
+      closed: true,
+    }
+  }
+
+  protected createEntity(a: WorldPoint, b: WorldPoint, ctx: ToolContext): Entity | null {
+    const box = boxFromCorners(a, b)
+    if (box.w < 1e-6 || box.h < 1e-6) return null
+    const points = buildHeartPath(box.minX, box.minY, box.maxX, box.maxY)
+    return {
+      id: createEntityId('polyline'),
+      type: 'polyline',
+      layerId: ctx.doc.getDefaultLayerId(),
+      style: activeLayerStyle(ctx, { fill: true }),
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      points,
+      closed: true,
+      shape: { kind: 'heart', cornerRadii: 0 },
+    }
+  }
+}
+
+export class StarTool extends DragShapeTool {
+  readonly name = 'star' as const
+
+  protected buildPreview(a: WorldPoint, b: WorldPoint): PreviewPrimitive {
+    const box = boxFromCorners(a, b)
+    const r = Math.min(box.w, box.h) / 2
+    return {
+      kind: 'polyline',
+      points: buildStarPath(box.cx, box.cy, r, 5).map((p) => worldPoint(p.x, p.y)),
+      closed: true,
+    }
+  }
+
+  protected createEntity(a: WorldPoint, b: WorldPoint, ctx: ToolContext): Entity | null {
+    const box = boxFromCorners(a, b)
+    const r = Math.min(box.w, box.h) / 2
+    if (r < 1e-6) return null
+    return {
+      id: createEntityId('polyline'),
+      type: 'polyline',
+      layerId: ctx.doc.getDefaultLayerId(),
+      style: activeLayerStyle(ctx, { fill: true }),
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      points: buildStarPath(box.cx, box.cy, r, 5),
+      closed: true,
+      shape: { kind: 'star', points: 5, cornerRadii: 0 },
     }
   }
 }
@@ -545,6 +610,7 @@ export class TextTool implements Tool {
     const screen = ctx.camera.worldToScreen(p)
     const textStyle = activeLayerStyle(ctx, { text: true })
     const textColor = textStyle.fill ?? textStyle.stroke ?? '#111827'
+    const layerId = ctx.doc.getDefaultLayerId()
     ctx.beginTextEdit?.({
       world: p,
       screenX: screen.x,
@@ -553,6 +619,7 @@ export class TextTool implements Tool {
       worldFontSize: 14,
       fontFamily: 'ui-sans-serif, system-ui, sans-serif',
       color: textColor,
+      layerId,
       initial: '',
       onCommit: (content) => {
         if (!content.trim()) {
@@ -562,7 +629,7 @@ export class TextTool implements Tool {
         const entity: Entity = {
           id: createEntityId('text'),
           type: 'text',
-          layerId: ctx.doc.getDefaultLayerId(),
+          layerId,
           style: textStyle,
           transform: IDENTITY_TRANSFORM,
           version: 1,
@@ -610,6 +677,8 @@ export function createBuiltinTools(): Tool[] {
     new RectangleTool(),
     new EllipseTool(),
     new CircleTool(),
+    new HeartTool(),
+    new StarTool(),
     new PolylineTool(),
     new PenTool(),
     new BrushTool(),

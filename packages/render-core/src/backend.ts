@@ -18,6 +18,16 @@ export interface FrameMetrics {
   /** Geometry bytes written this frame (0 on pan-only reuse). */
   geometryUploadBytes?: number
   mode?: 'full' | 'pan-reuse' | 'zoom-bin'
+  /** Pixel-side redraw strategy (persistent scene target). */
+  gpuRedraw?: 'full' | 'dirty' | 'pan-blit' | 'present'
+}
+
+/** CSS-pixel axis-aligned dirty / strip rect (canvas local). */
+export interface ScreenRect {
+  x: number
+  y: number
+  w: number
+  h: number
 }
 
 export interface GridOverlayInput {
@@ -45,6 +55,18 @@ export interface RenderFrameInput {
   lodBin?: number
   mode?: 'full' | 'pan-reuse' | 'zoom-bin'
   textures?: TextureResolver
+  /**
+   * When false, enable incremental pixel paths (dirty / pan-blit / present).
+   * Omit or true → full clear + redraw (safe default).
+   */
+  dirtyFullscreen?: boolean
+  /** World→screen dirty regions in CSS px; used when dirtyFullscreen === false. */
+  dirtyScreenRects?: ReadonlyArray<ScreenRect>
+  /**
+   * Shift previous scene pixels by (dx, dy) CSS px, then redraw uncovered strips.
+   * Sign: content motion = (prevCam - currCam) * zoom.
+   */
+  panPixelDelta?: { dx: number; dy: number }
 }
 
 export interface PickResult {

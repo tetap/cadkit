@@ -30,6 +30,7 @@
     "@cadkit/guides": "workspace:*",
     "@cadkit/interaction": "workspace:*",
     "@cadkit/io-dxf": "workspace:*",
+    "@cadkit/io-gcode": "workspace:*",
     "@cadkit/io-svg": "workspace:*",
     "@cadkit/platform-web": "workspace:*",
     "@cadkit/render-core": "workspace:*",

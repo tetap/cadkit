@@ -52,6 +52,9 @@
       "path": "../io-dxf"
     },
     {
+      "path": "../io-gcode"
+    },
+    {
       "path": "../platform-web"
     },
     {

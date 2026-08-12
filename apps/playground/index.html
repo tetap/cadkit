@@ -31,6 +31,11 @@
             class="pointer-events-none absolute inset-y-0 left-0 z-20 hidden w-[260px]"
             aria-label="Layers"
           ></aside>
+          <aside
+            id="effects-panel"
+            class="pointer-events-none absolute inset-y-0 right-0 z-20 hidden w-[240px]"
+            aria-label="Effects"
+          ></aside>
           <div
             id="context-bar"
             class="pointer-events-none absolute inset-x-0 top-8 z-20 flex justify-center px-4"
@@ -46,21 +51,13 @@
         </div>
       </section>
 
-      <!-- Right: file chrome + status (layers dock floats over canvas) -->
+      <!-- Right: layer G-code engraver params -->
       <aside
         class="flex w-[240px] shrink-0 flex-col border-l border-line bg-panel"
         aria-label="Sidebar"
       >
-        <header id="app-bar" class="shrink-0 border-b border-line" role="banner"></header>
-        <nav
-          id="side-tabs"
-          class="flex shrink-0 gap-0.5 border-b border-line px-1.5 pt-1"
-          aria-label="Sidebar panels"
-        ></nav>
         <div class="min-h-0 flex-1 overflow-y-auto">
-          <div id="inspector-panel" class="p-3"></div>
-          <div id="effects-panel" class="hidden p-3"></div>
-          <div id="layer-gcode-panel" class="hidden"></div>
+          <div id="layer-gcode-panel"></div>
         </div>
         <div
           id="status-bar"

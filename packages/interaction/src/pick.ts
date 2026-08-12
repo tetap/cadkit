@@ -124,7 +124,7 @@ function angleInSweep(angle: number, start: number, end: number): boolean {
 
 /**
  * Pick the topmost entity whose (optionally padded) world AABB contains the point.
- * Stack order: higher scene pickId wins (later-created / upper in draw stack).
+ * Stack order: higher scene stackOrder wins (front layer / later within layer).
  *
  * Groups are hittable via their aggregated child AABB (empty space inside the
  * group frame). Leaf geometry still wins over a containing group so edit-mode
@@ -164,7 +164,7 @@ export function pickEntity(ctx: PickContext, world: WorldPoint, _screen: ScreenP
 
     // Inflate so zero-thickness strokes remain hittable near the line.
     if (!pointInAABB(world, inflateAABB(box, pad))) continue
-    const order = ctx.scene.getPickId(id) ?? 0
+    const order = ctx.scene.getStackOrder(id)
     if (e.type === 'group') {
       if (order >= bestGroupOrder) {
         bestGroupOrder = order

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { arcTextStringMidpoint, translate } from '@cadkit/geometry'
+import {
+  arcTextStringMidpoint,
+  buildStarPath,
+  starConstructionRadius,
+  starCornerHandleX,
+  starTipsDragStep,
+  starTipsHandleLocal,
+  translate,
+} from '@cadkit/geometry'
 import {
   IDENTITY_TRANSFORM,
   createEntityId,
@@ -199,31 +207,6 @@ describe('entity-edit', () => {
     expect(path.radius).toBeCloseTo(114, 5)
   })
 
-  it('edits circle radius handle', () => {
-    const circle = {
-      id: createEntityId('c'),
-      type: 'circle' as const,
-      layerId: layer,
-      style: {},
-      transform: IDENTITY_TRANSFORM,
-      version: 1,
-      center: { x: 0, y: 0 },
-      radius: 5,
-    }
-    const patch = handleEditPatch(
-      circle,
-      {
-        id: `${circle.id}:radius`,
-        entityId: circle.id,
-        kind: 'radius',
-        world: { x: 5, y: 0, __space: 'world' },
-        cursor: 'ew-resize',
-      },
-      { x: 10, y: 0 },
-    )
-    expect(patch).toEqual({ radius: 10 })
-  })
-
   it('removes polyline vertices and drops the path when too few remain', () => {
     const poly = {
       id: createEntityId('poly'),
@@ -304,6 +287,235 @@ describe('entity-edit', () => {
       points: poly.points,
       holes: [],
     })
+  })
+
+  it('circle Arc handle opens into an arc without requiring edit mode semantics', () => {
+    const circle = {
+      id: createEntityId('c'),
+      type: 'circle' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      center: { x: 0, y: 0 },
+      radius: 40,
+    }
+    const patch = handleEditPatch(
+      circle,
+      {
+        id: `${circle.id}:arc-open`,
+        entityId: circle.id,
+        kind: 'angle',
+        world: { x: 40, y: 0, __space: 'world' },
+        cursor: 'crosshair',
+        appearance: 'shape-param',
+        label: 'Arc',
+      },
+      { x: 0, y: 40 },
+      undefined,
+      { arcDrag: { startAngle: 0, endAngle: Math.PI * 2 } },
+    )
+    expect(patch).toMatchObject({
+      type: 'arc',
+      startAngle: 0,
+      radius: 40,
+    })
+    expect((patch as { endAngle: number }).endAngle).toBeCloseTo(Math.PI / 2, 5)
+  })
+
+  it('arc Start handle rotates the whole wedge', () => {
+    const arc = {
+      id: createEntityId('a'),
+      type: 'arc' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      center: { x: 0, y: 0 },
+      radius: 40,
+      startAngle: 0,
+      endAngle: Math.PI / 2,
+    }
+    const patch = handleEditPatch(
+      arc,
+      {
+        id: `${arc.id}:arc-start`,
+        entityId: arc.id,
+        kind: 'angle',
+        world: { x: 40, y: 0, __space: 'world' },
+        cursor: 'crosshair',
+      },
+      { x: 0, y: 40 },
+      undefined,
+      { arcDrag: { startAngle: 0, endAngle: Math.PI / 2 } },
+    )
+    expect((patch as { startAngle: number }).startAngle).toBeCloseTo(Math.PI / 2, 5)
+    expect((patch as { endAngle: number }).endAngle).toBeCloseTo(Math.PI, 5)
+  })
+
+  it('rect corner handle does not jump on press and updates radius', () => {
+    const rect = {
+      id: createEntityId('rect'),
+      type: 'polyline' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      points: [
+        { x: 0, y: 0 },
+        { x: 100, y: 0 },
+        { x: 100, y: 60 },
+        { x: 0, y: 60 },
+      ],
+      closed: true,
+      shape: { kind: 'rect' as const, cornerRadii: 0 },
+    }
+    const pad = 8
+    const startWorld = { x: pad * Math.SQRT1_2, y: pad * Math.SQRT1_2 }
+    const rectDrag = {
+      minX: 0,
+      minY: 0,
+      maxX: 100,
+      maxY: 60,
+      cornerId: 'tl' as const,
+      pad,
+      cornerRadii: 0,
+    }
+    const press = handleEditPatch(
+      rect,
+      {
+        id: `${rect.id}:corner:tl`,
+        entityId: rect.id,
+        kind: 'radius',
+        world: { ...startWorld, __space: 'world' },
+        cursor: 'nwse-resize',
+        appearance: 'corner-radius',
+      },
+      startWorld,
+      undefined,
+      { startWorld, rectDrag },
+    )
+    expect(press?.shape).toMatchObject({ cornerRadii: 0 })
+
+    const dragTo = { x: (pad + 12) * Math.SQRT1_2, y: (pad + 12) * Math.SQRT1_2 }
+    const dragged = handleEditPatch(
+      rect,
+      {
+        id: `${rect.id}:corner:tl`,
+        entityId: rect.id,
+        kind: 'radius',
+        world: { ...startWorld, __space: 'world' },
+        cursor: 'nwse-resize',
+      },
+      dragTo,
+      undefined,
+      { startWorld, rectDrag },
+    )
+    expect(dragged?.shape).toMatchObject({ cornerRadii: expect.closeTo(12, 5) })
+    expect((dragged as { points: unknown[] }).points.length).toBeGreaterThan(4)
+  })
+
+  it('star tip / corner handles keep size and do not jump on press', () => {
+    const cx = 100
+    const cy = 80
+    const outerR = 40
+    const tips = 8
+    const corner = 0
+    const star = {
+      id: createEntityId('star'),
+      type: 'polyline' as const,
+      layerId: layer,
+      style: {},
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      points: buildStarPath(cx, cy, outerR, tips, 0.4, corner),
+      closed: true,
+      shape: { kind: 'star' as const, points: tips, cornerRadii: corner },
+    }
+    const starDrag = { cx, cy, outerR, tips, corner }
+    const tipLocal = starTipsHandleLocal(cx, cy, outerR, 12)
+    const tipPatch = handleEditPatch(
+      star,
+      {
+        id: `${star.id}:star-tips`,
+        entityId: star.id,
+        kind: 'angle',
+        world: { x: tipLocal.x, y: tipLocal.y, __space: 'world' },
+        cursor: 'ns-resize',
+        appearance: 'star-tips',
+      },
+      tipLocal,
+      undefined,
+      { starDrag, startWorld: tipLocal },
+    )
+    expect(tipPatch?.shape).toMatchObject({ points: tips })
+    const tipR = starConstructionRadius(
+      (tipPatch as { points: { x: number; y: number }[] }).points,
+      cx,
+      cy,
+      tips,
+      corner,
+    )
+    expect(tipR).toBeCloseTo(outerR, 5)
+
+    const moreTips = handleEditPatch(
+      star,
+      {
+        id: `${star.id}:star-tips`,
+        entityId: star.id,
+        kind: 'angle',
+        world: { x: tipLocal.x, y: tipLocal.y, __space: 'world' },
+        cursor: 'ns-resize',
+        appearance: 'star-tips',
+      },
+      { x: tipLocal.x, y: tipLocal.y - starTipsDragStep(outerR) },
+      undefined,
+      { starDrag, startWorld: tipLocal },
+    )
+    expect(moreTips?.shape).toMatchObject({ points: tips + 1 })
+    // Tips handle must stay on the midline even after tip count changes.
+    expect(starTipsHandleLocal(cx, cy, outerR, 12).y).toBe(cy)
+
+    const cornerX = starCornerHandleX(cx, outerR, corner)
+    const cornerPatch = handleEditPatch(
+      star,
+      {
+        id: `${star.id}:star-corner`,
+        entityId: star.id,
+        kind: 'radius',
+        world: { x: cornerX, y: cy, __space: 'world' },
+        cursor: 'ew-resize',
+        appearance: 'corner-radius',
+      },
+      { x: cornerX, y: cy },
+      undefined,
+      { starDrag },
+    )
+    expect(cornerPatch?.shape).toMatchObject({ cornerRadii: 0 })
+
+    const insetX = starCornerHandleX(cx, outerR, 5)
+    const rounded = handleEditPatch(
+      star,
+      {
+        id: `${star.id}:star-corner`,
+        entityId: star.id,
+        kind: 'radius',
+        world: { x: cornerX, y: cy, __space: 'world' },
+        cursor: 'ew-resize',
+      },
+      { x: insetX, y: cy },
+      undefined,
+      { starDrag },
+    )
+    expect(rounded?.shape).toMatchObject({ cornerRadii: 5 })
+    const roundedR = starConstructionRadius(
+      (rounded as { points: { x: number; y: number }[] }).points,
+      cx,
+      cy,
+      tips,
+      5,
+    )
+    expect(roundedR).toBeCloseTo(outerR, 1)
   })
 
   it('writes nested line endpoints in parent-local space', () => {

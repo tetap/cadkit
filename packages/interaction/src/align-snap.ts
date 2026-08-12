@@ -98,20 +98,24 @@ export function snapSelectionTranslation(
     }
   }
 
-  // Grid snap on selection center (optional)
+  // Grid snap on selection center (optional) — was silent; emit guides below.
+  let gridSnapX: number | null = null
+  let gridSnapY: number | null = null
   if (options.gridSize && options.gridSize > 0 && options.enabled) {
     const g = options.gridSize
-    const cx = (proposed.minX + proposed.maxX) / 2 + (bestDx - rawDx)
-    const cy = (proposed.minY + proposed.maxY) / 2 + (bestDy - rawDy)
     // proposed already includes raw; adjust best so center lands on grid
     const adjCx = (proposed.minX + proposed.maxX) / 2 + (bestDx - rawDx)
     const adjCy = (proposed.minY + proposed.maxY) / 2 + (bestDy - rawDy)
-    void cx
-    void cy
     const gx = Math.round(adjCx / g) * g
     const gy = Math.round(adjCy / g) * g
-    if (Math.abs(gx - adjCx) <= tol) bestDx += gx - adjCx
-    if (Math.abs(gy - adjCy) <= tol) bestDy += gy - adjCy
+    if (Math.abs(gx - adjCx) <= tol) {
+      bestDx += gx - adjCx
+      gridSnapX = gx
+    }
+    if (Math.abs(gy - adjCy) <= tol) {
+      bestDy += gy - adjCy
+      gridSnapY = gy
+    }
   }
 
   // Build guides from final snapped AABB vs targets
@@ -123,6 +127,24 @@ export function snapSelectionTranslation(
   }
   const finalEdges = aabbEdges(finalBox)
   const showDist = options.showDistances !== false
+
+  // Visual feedback for grid snap (through selection AABB span).
+  if (gridSnapX != null) {
+    guides.push({
+      axis: 'x',
+      position: gridSnapX,
+      spanMin: finalBox.minY,
+      spanMax: finalBox.maxY,
+    })
+  }
+  if (gridSnapY != null) {
+    guides.push({
+      axis: 'y',
+      position: gridSnapY,
+      spanMin: finalBox.minX,
+      spanMax: finalBox.maxX,
+    })
+  }
 
   if (options.alignEnabled !== false) {
     for (const e of others) {

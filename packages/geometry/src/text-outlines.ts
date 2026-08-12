@@ -8,7 +8,7 @@
  * - arc: em-box bottom-center at layout pose (CSS translate(-50%, -100%))
  */
 import type { TextEntity, Vec2 } from '@cadkit/types'
-import { arcTextLocalBounds, layoutArcText } from './arc-text.js'
+import { layoutArcText } from './arc-text.js'
 import { measureTextLine } from './text-metrics.js'
 
 export interface TextOutlineContour {
@@ -19,7 +19,45 @@ export interface TextOutlineContour {
 const MAX_CANVAS = 2048
 const TARGET_EM_PX = 96
 
+/**
+ * Cache glyph rings relative to `entity.position` so translating text during a
+ * live offset preview only needs a cheap translate (no re-rasterize).
+ */
+const outlineCache = new Map<
+  string,
+  { sig: string; relative: TextOutlineContour[] }
+>()
+
+function outlineSignature(entity: TextEntity): string {
+  return JSON.stringify({
+    c: entity.content,
+    ff: entity.fontFamily || 'sans-serif',
+    fs: entity.fontSize,
+    wf: entity.widthFactor ?? 1,
+    al: entity.align ?? 'left',
+    rot: entity.rotation ?? 0,
+    path: entity.path ?? null,
+  })
+}
+
+function shiftContours(
+  contours: readonly TextOutlineContour[],
+  dx: number,
+  dy: number,
+): TextOutlineContour[] {
+  if (dx === 0 && dy === 0) return contours.map((c) => ({ ...c, points: c.points.map((p) => ({ ...p })) }))
+  return contours.map((c) => ({
+    closed: true as const,
+    points: c.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+  }))
+}
+
 function getCanvas(): HTMLCanvasElement | OffscreenCanvas | null {
+  // Prefer a document canvas so font matching matches TextOverlay (OffscreenCanvas
+  // often falls back to a different face → systematic outline drift).
+  if (typeof document !== 'undefined') {
+    return document.createElement('canvas')
+  }
   if (typeof OffscreenCanvas !== 'undefined') {
     try {
       return new OffscreenCanvas(8, 8)
@@ -27,10 +65,34 @@ function getCanvas(): HTMLCanvasElement | OffscreenCanvas | null {
       /* fall through */
     }
   }
-  if (typeof document !== 'undefined') {
-    return document.createElement('canvas')
-  }
   return null
+}
+
+function fontCss(fontSize: number, fontFamily: string): string {
+  return `${Math.max(1e-6, fontSize)}px ${fontFamily || 'sans-serif'}`
+}
+
+/** True when the browser reports the face ready for this CSS font string. */
+function isFontReady(css: string): boolean {
+  if (typeof document === 'undefined' || !document.fonts) return true
+  try {
+    return document.fonts.check(css)
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Kick off font load when needed. Callers should avoid caching outlines until
+ * {@link isFontReady} is true — otherwise a fallback face gets sticky.
+ */
+function ensureFontLoaded(css: string): void {
+  if (typeof document === 'undefined' || !document.fonts) return
+  try {
+    if (!document.fonts.check(css)) void document.fonts.load(css)
+  } catch {
+    /* ignore */
+  }
 }
 
 function get2d(
@@ -52,15 +114,40 @@ export function textEntityToLocalOutlines(
 ): TextOutlineContour[] {
   if (!entity.content) return []
 
+  const sig = outlineSignature(entity)
+  const cacheKey = String(entity.id)
+  const hit = outlineCache.get(cacheKey)
+  if (hit && hit.sig === sig && !opts?.pixelsPerEm) {
+    return shiftContours(hit.relative, entity.position.x, entity.position.y)
+  }
+
   const canvas = getCanvas()
   if (!canvas) return []
   const ctx = get2d(canvas)
   if (!ctx) return []
 
-  if (entity.path?.kind === 'arc') {
-    return outlineArcText(entity, canvas, ctx, opts)
+  const css = fontCss(entity.fontSize, entity.fontFamily || 'sans-serif')
+  ensureFontLoaded(css)
+
+  const absolute =
+    entity.path?.kind === 'arc'
+      ? outlineArcText(entity, canvas, ctx, opts)
+      : outlineStraightText(entity, canvas, ctx, opts)
+
+  // Only cache default-resolution outlines once the face is ready. Caching a
+  // fallback raster permanently desyncs preview from the DOM TextOverlay.
+  if (!opts?.pixelsPerEm && absolute.length && isFontReady(css)) {
+    outlineCache.set(cacheKey, {
+      sig,
+      relative: shiftContours(absolute, -entity.position.x, -entity.position.y),
+    })
   }
-  return outlineStraightText(entity, canvas, ctx, opts)
+  return absolute
+}
+
+/** Drop cached outlines (tests / document reload). */
+export function clearTextOutlineCache(): void {
+  outlineCache.clear()
 }
 
 function outlineStraightText(
@@ -72,42 +159,47 @@ function outlineStraightText(
   const fontSize = Math.max(1e-6, entity.fontSize)
   const fontFamily = entity.fontFamily || 'sans-serif'
   const wf = entity.widthFactor ?? 1
+  const absWf = Math.abs(wf) || 1
   const align = entity.align ?? 'left'
   const rot = entity.rotation ?? 0
   const lines = entity.content.split(/\r?\n/u)
   const lineCount = Math.max(1, lines.length)
 
-  // Layout in unrotated local space (baseline at y=0 for first line), then rotate
-  // around the entity anchor — same as TextOverlay transform-origin at baseline.
-  let inkMinX = Infinity
-  let inkMinY = Infinity
-  let inkMaxX = -Infinity
-  let inkMaxY = -Infinity
+  // Layout in unrotated local space (baseline at y=0 for first line), then
+  // rotate + scaleX(wf) around the entity anchor — same as TextOverlay.
+  // Use |wf| for advances; negative wf only flips via ctx.scale (CSS scaleX).
+  let localMinX = Infinity
+  let localMaxX = -Infinity
+  let localMinY = Infinity
+  let localMaxY = -Infinity
   const lineLayouts: Array<{ text: string; x: number; baseline: number }> = []
 
   for (let i = 0; i < lineCount; i++) {
     const text = lines[i] ?? ''
     const m = measureTextLine(text, fontSize, fontFamily)
-    const advance = m.advance * wf
+    const advance = m.advance * absWf
     const baseline = i * fontSize
     let lineLeft = 0
     if (align === 'center') lineLeft = -advance / 2
     else if (align === 'right') lineLeft = -advance
-    lineLayouts.push({ text, x: lineLeft / wf, baseline })
-    // Em-box style bounds (match CSS line-height:1 bottom = baseline).
-    inkMinX = Math.min(inkMinX, lineLeft)
-    inkMaxX = Math.max(inkMaxX, lineLeft + advance)
-    inkMinY = Math.min(inkMinY, baseline - fontSize)
-    inkMaxY = Math.max(inkMaxY, baseline)
+    // Unscaled x for fillText (ctx.scale applies |wf| and sign).
+    lineLayouts.push({ text, x: lineLeft / absWf, baseline })
+    // Mirrored em-box about local Y when wf < 0 (matches bounds.ts).
+    const x0 = wf < 0 ? -lineLeft - advance : lineLeft
+    const x1 = x0 + advance
+    localMinX = Math.min(localMinX, x0, x1)
+    localMaxX = Math.max(localMaxX, x0, x1)
+    localMinY = Math.min(localMinY, baseline - fontSize)
+    localMaxY = Math.max(localMaxY, baseline)
   }
-  if (!Number.isFinite(inkMinX)) return []
+  if (!Number.isFinite(localMinX)) return []
 
   // Expand by ink overhang / rotation by taking corners of local ink AABB.
   const corners: Vec2[] = [
-    { x: inkMinX, y: inkMinY },
-    { x: inkMaxX, y: inkMinY },
-    { x: inkMaxX, y: inkMaxY },
-    { x: inkMinX, y: inkMaxY },
+    { x: localMinX, y: localMinY },
+    { x: localMaxX, y: localMinY },
+    { x: localMaxX, y: localMaxY },
+    { x: localMinX, y: localMaxY },
   ]
   const cos = Math.cos(rot)
   const sin = Math.sin(rot)
@@ -152,6 +244,11 @@ function outlineStraightText(
   })
 }
 
+/**
+ * Per-glyph outlines placed with the same pose transform as TextOverlay:
+ * `translate(pose) rotate translate(-50%, -100%)` with transform-origin 0 0
+ * (em-box bottom-center on the layout pose).
+ */
 function outlineArcText(
   entity: TextEntity,
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -163,7 +260,7 @@ function outlineArcText(
 
   const fontSize = Math.max(1e-6, entity.fontSize)
   const fontFamily = entity.fontFamily || 'sans-serif'
-  const wf = entity.widthFactor ?? 1
+  const wf = Math.max(1e-6, entity.widthFactor ?? 1)
   const poses = layoutArcText(
     entity.content,
     fontSize,
@@ -175,28 +272,61 @@ function outlineArcText(
 
   if (!poses.length) return []
 
-  const box = arcTextLocalBounds(
-    entity.content,
-    fontSize,
-    entity.position,
-    path,
-    wf,
-    fontFamily,
-  )
+  // Cache by char + visual advance (advance/wf); widthFactor only spaces the arc.
+  const glyphCache = new Map<string, TextOutlineContour[]>()
+  const out: TextOutlineContour[] = []
 
-  // Overlay anchors em-box bottom at each pose (textBaseline bottom).
-  // arcTextLocalBounds uses alphabetic ascent which is often < 1em — expand so
-  // the raster bitmap does not clip glyph tops.
-  let inkMinX = box.minX
-  let inkMinY = box.minY
-  let inkMaxX = box.maxX
-  let inkMaxY = box.maxY
   for (const g of poses) {
-    inkMinX = Math.min(inkMinX, g.x - fontSize)
-    inkMaxX = Math.max(inkMaxX, g.x + fontSize)
-    inkMinY = Math.min(inkMinY, g.y - fontSize)
-    inkMaxY = Math.max(inkMaxY, g.y + fontSize * 0.35)
+    const visualAdvance = Math.max(fontSize * 0.2, g.advance / wf)
+    const cacheKey = `${g.char}\0${visualAdvance.toFixed(3)}`
+    let local = glyphCache.get(cacheKey)
+    if (!local) {
+      local = rasterizeGlyphLocal(
+        canvas,
+        ctx,
+        g.char,
+        fontSize,
+        fontFamily,
+        visualAdvance,
+        opts?.pixelsPerEm,
+      )
+      glyphCache.set(cacheKey, local)
+    }
+    const cos = Math.cos(g.rotation)
+    const sin = Math.sin(g.rotation)
+    for (const c of local) {
+      out.push({
+        closed: true,
+        points: c.points.map((p) => ({
+          x: g.x + p.x * cos - p.y * sin,
+          y: g.y + p.x * sin + p.y * cos,
+        })),
+      })
+    }
   }
+  return out
+}
+
+/**
+ * Rasterize one glyph in local space with em-box bottom-center at (0,0).
+ * `advance` is the CSS/layout box width (matches TextOverlay span width).
+ */
+function rasterizeGlyphLocal(
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  char: string,
+  fontSize: number,
+  fontFamily: string,
+  advance: number,
+  pixelsPerEm?: number,
+): TextOutlineContour[] {
+  const pad = fontSize * 0.35
+  const hw = Math.max(advance, fontSize * 0.5) / 2
+  // Local em-box matching TextOverlay: x ∈ [-hw, hw], y ∈ [-em, 0], plus ink pad.
+  const inkMinX = -hw - pad
+  const inkMaxX = hw + pad
+  const inkMinY = -fontSize - pad
+  const inkMaxY = fontSize * 0.35 + pad
 
   return rasterizeContours({
     canvas,
@@ -206,22 +336,14 @@ function outlineArcText(
     inkMinY,
     inkMaxX,
     inkMaxY,
-    pixelsPerEm: opts?.pixelsPerEm,
+    pixelsPerEm,
     draw: (scale, originX, originY) => {
       ctx.setTransform(scale, 0, 0, scale, -originX * scale, -originY * scale)
-      ctx.font = `${fontSize}px ${fontFamily}`
+      ctx.font = fontCss(fontSize, fontFamily)
       ctx.textAlign = 'center'
-      // Match TextOverlay: translate(-50%, -100%) → em-box bottom-center on pose.
       ctx.textBaseline = 'bottom'
       ctx.fillStyle = '#000'
-      for (const g of poses) {
-        ctx.save()
-        ctx.translate(g.x, g.y)
-        ctx.rotate(g.rotation)
-        // Overlay does not scaleX glyphs; widthFactor only affects arc spacing.
-        ctx.fillText(g.char, 0, 0)
-        ctx.restore()
-      }
+      ctx.fillText(char, 0, 0)
     },
   })
 }
@@ -280,9 +402,10 @@ function rasterizeContours(args: {
     if (ring.length < 3) continue
     const pts: Vec2[] = []
     for (const [px, py] of ring) {
+      // Moore trace yields integer pixel indices; sample at pixel centers.
       pts.push({
-        x: originX + px / scale,
-        y: originY + py / scale,
+        x: originX + (px + 0.5) / scale,
+        y: originY + (py + 0.5) / scale,
       })
     }
     const simplified = simplifyRdp(dedupe(pts), Math.max(1 / scale, fontSize * 0.012))

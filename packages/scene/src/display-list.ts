@@ -1,7 +1,7 @@
 import type { AABB, Entity, EntityId, PerformanceConfig } from '@cadkit/types'
 import { aabbWidth, aabbHeight } from '@cadkit/types'
 import {
-  layerFillFromStroke,
+  resolveLayerAwarePaint,
   type CadDocument,
   type DocumentChange,
 } from '@cadkit/document'
@@ -12,7 +12,9 @@ import {
   resolveWorldMatrix,
   tessellateArc,
   tessellateCubicChain,
+  textEntityToLocalOutlines,
   transformPoint,
+  worldAxisAlignedRectInstance,
 } from '@cadkit/geometry'
 
 /** Return true when the entity should be skipped for density LOD. */
@@ -20,6 +22,16 @@ function shouldSkipByDensity(id: EntityId, stride: number): boolean {
   let h = 0
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
   return h % stride !== 0
+}
+
+/** True when `inner` is fully inside `outer`. */
+function aabbContains(outer: AABB, inner: AABB): boolean {
+  return (
+    inner.minX >= outer.minX &&
+    inner.minY >= outer.minY &&
+    inner.maxX <= outer.maxX &&
+    inner.maxY <= outer.maxY
+  )
 }
 
 function performanceNow(): number {
@@ -86,6 +98,9 @@ interface GeomCacheEntry {
   items: RenderItem[]
 }
 
+/** Screen-edge threshold (px) below which density LOD starts thinning. */
+const DENSITY_LOD_PX = 3
+
 export class SceneProjector {
   private readonly index = new SpatialIndex()
   private readonly pickIds = new Map<EntityId, number>()
@@ -95,12 +110,17 @@ export class SceneProjector {
   private dirty = true
   private revision = 0
   private cachedBuild: SceneBuildResult | null = null
-  private lastCamera = { x: 0, y: 0, zoom: 1, vw: 0, vh: 0 }
+  /** Camera at last geometry build (not updated on geom-reuse). */
+  private lastBuildCamera = { x: 0, y: 0, zoom: 1, vw: 0, vh: 0 }
+  /** Padded search AABB from last geometry build — reuse while current view ⊆ this. */
+  private lastSearchView: AABB | null = null
   /** World-space bounds invalidated since last consume (for future partial redraw). */
   private pendingDirtyBounds: AABB[] = []
   private dirtyFullscreen = false
   /** Bumped when layer color / visibility changes so geom cache invalidates. */
   private layerEpoch = 0
+  /** Cached layer count for O(1) stack bands (refreshed on layer notify / rebuild). */
+  private layerCountCache = 1
 
   constructor(
     private readonly doc: CadDocument,
@@ -112,14 +132,29 @@ export class SceneProjector {
   /** Call after layer color/visibility edits that are not entity DocumentChanges. */
   notifyLayersChanged(): void {
     this.layerEpoch++
+    this.layerCountCache = Math.max(1, this.doc.getLayers().length)
     this.geomCache.clear()
     this.dirty = true
     this.revision++
     this.cachedBuild = null
+    this.lastSearchView = null
     this.dirtyFullscreen = true
   }
 
-  /** Consume change-invalidation metadata (stable hook for future dirty-rect redraw). */
+  /**
+   * Drop projected geometry cache (e.g. after webfont load settles so glyph
+   * outlines are re-traced). Forces a full scene rebuild on next frame.
+   */
+  invalidateGeometryCache(): void {
+    this.geomCache.clear()
+    this.cachedBuild = null
+    this.dirty = true
+    this.lastSearchView = null
+    this.dirtyFullscreen = true
+    this.revision++
+  }
+
+  /** Consume change-invalidation metadata for dirty-rect / pan-blit GPU paths. */
   consumeDirtyMeta(): { fullscreen: boolean; rects: AABB[] } {
     const result = { fullscreen: this.dirtyFullscreen, rects: this.pendingDirtyBounds }
     this.pendingDirtyBounds = []
@@ -154,6 +189,7 @@ export class SceneProjector {
     this.dirty = true
     this.revision++
     this.cachedBuild = null
+    this.lastSearchView = null
   }
 
   rebuildIndex(): void {
@@ -169,9 +205,11 @@ export class SceneProjector {
       .filter((i) => i.bounds)
     this.index.bulkLoad(items)
     this.geomCache.clear()
+    this.layerCountCache = Math.max(1, this.doc.getLayers().length)
     this.dirty = true
     this.revision++
     this.cachedBuild = null
+    this.lastSearchView = null
     this.dirtyFullscreen = true
     this.pendingDirtyBounds = []
   }
@@ -180,33 +218,26 @@ export class SceneProjector {
     const state = camera.getState()
     const bin = lodBin(state.zoom, this.lastLodBin)
     const zoomChanged = this.lastLodBin !== null && this.lastLodBin !== bin
-    const panOnly =
+    const viewportSame =
+      state.viewportWidth === this.lastBuildCamera.vw &&
+      state.viewportHeight === this.lastBuildCamera.vh
+
+    // Pan or zoom within the same lodBin: reuse display list + skip GPU upload
+    // while the current view stays inside the previous padded search AABB.
+    if (
       !this.dirty &&
-      !zoomChanged &&
       this.cachedBuild != null &&
       this.cachedBuild.lodBin === bin &&
-      state.zoom === this.lastCamera.zoom &&
-      state.viewportWidth === this.lastCamera.vw &&
-      state.viewportHeight === this.lastCamera.vh
-
-    // Pure pan: reuse previous display list + skip GPU geometry upload.
-    // Rebuild when the view center drifts far enough that edge coverage may miss.
-    if (panOnly && this.cachedBuild) {
-      const dx = (state.x - this.lastCamera.x) * state.zoom
-      const dy = (state.y - this.lastCamera.y) * state.zoom
-      const drift = Math.hypot(dx, dy)
-      const threshold = Math.min(state.viewportWidth, state.viewportHeight) * 0.35
-      if (drift < threshold) {
-        this.lastCamera = {
-          x: state.x,
-          y: state.y,
-          zoom: state.zoom,
-          vw: state.viewportWidth,
-          vh: state.viewportHeight,
-        }
+      viewportSame &&
+      this.lastSearchView
+    ) {
+      const view = camera.getVisibleWorldBounds()
+      if (aabbContains(this.lastSearchView, view)) {
+        const mode: SceneBuildMode =
+          state.zoom === this.lastBuildCamera.zoom ? 'pan-reuse' : 'zoom-bin'
         return {
           ...this.cachedBuild,
-          mode: 'pan-reuse',
+          mode,
           skipGeometryUpload: true,
           stats: { ...this.cachedBuild.stats, buildMs: 0 },
         }
@@ -216,9 +247,9 @@ export class SceneProjector {
     const t0 = performanceNow()
     this.lastLodBin = bin
     const view = camera.getVisibleWorldBounds()
-    // Expand search slightly so pan-reuse has margin.
-    const padX = (view.maxX - view.minX) * 0.15
-    const padY = (view.maxY - view.minY) * 0.15
+    // Expand search so pan/zoom reuse has margin.
+    const padX = (view.maxX - view.minX) * 0.2
+    const padY = (view.maxY - view.minY) * 0.2
     const searchView: AABB = {
       minX: view.minX - padX,
       minY: view.minY - padY,
@@ -229,12 +260,24 @@ export class SceneProjector {
     const worldPerPixel = 1 / state.zoom
     const pixelError = this.performance.lodNavigationPx
     const ids = this.index.search(searchView)
-    const items: RenderItem[] = []
-    let culled = 0
-    let cacheHits = 0
-    let cacheMisses = 0
+    const maxVisible = this.performance.maxVisible
+    const selectExemptMax = this.performance.selectionLodExemptMax
+    const selectionExempt = selected.size > 0 && selected.size <= selectExemptMax
 
-    for (const id of ids) {
+    type Candidate = {
+      id: EntityId
+      entity: Entity
+      bounds: AABB
+      maxEdge: number
+      selected: boolean
+    }
+    const candidates: Candidate[] = []
+    let culled = 0
+    const zoom = state.zoom
+    const hasSelection = selected.size > 0
+
+    for (let ii = 0; ii < ids.length; ii++) {
+      const id = ids[ii]!
       const entity = this.doc.getEntity(id)
       if (!entity || entity.style.visible === false) continue
       const layer = this.doc.getLayer(entity.layerId)
@@ -242,17 +285,50 @@ export class SceneProjector {
       const bounds = this.doc.getBounds(id)
       if (!bounds) continue
 
-      const screenW = aabbWidth(bounds) * state.zoom
-      const screenH = aabbHeight(bounds) * state.zoom
-      const maxEdge = Math.max(screenW, screenH)
-      if (!selected.has(id) && maxEdge < 0.75) {
-        const stride = maxEdge < 0.15 ? 32 : maxEdge < 0.35 ? 8 : 2
+      const maxEdge = Math.max(aabbWidth(bounds), aabbHeight(bounds)) * zoom
+      const isSel = hasSelection && selected.has(id)
+      // Large selections (layer select-all) must not bypass density LOD.
+      const exempt = isSel && selectionExempt
+      if (!exempt && maxEdge < DENSITY_LOD_PX) {
+        const stride =
+          maxEdge < 0.25 ? 64 : maxEdge < 0.6 ? 16 : maxEdge < 1.2 ? 8 : maxEdge < 2 ? 4 : 2
         if (shouldSkipByDensity(id, stride)) {
           culled++
           continue
         }
       }
 
+      candidates.push({ id, entity, bounds, maxEdge, selected: isSel })
+    }
+
+    // Hard budget: prefer larger-on-screen; avoid O(n log n) when massively over.
+    if (maxVisible > 0 && candidates.length > maxVisible) {
+      if (candidates.length > maxVisible * 4) {
+        const stride = Math.ceil(candidates.length / (maxVisible * 2))
+        const thinned: Candidate[] = []
+        for (let i = 0; i < candidates.length; i++) {
+          const c = candidates[i]!
+          if (c.selected || i % stride === 0) thinned.push(c)
+        }
+        culled += candidates.length - thinned.length
+        candidates.length = 0
+        candidates.push(...thinned)
+      }
+      if (candidates.length > maxVisible) {
+        candidates.sort((a, b) => {
+          if (a.selected !== b.selected) return a.selected ? -1 : 1
+          return b.maxEdge - a.maxEdge
+        })
+        culled += candidates.length - maxVisible
+        candidates.length = maxVisible
+      }
+    }
+
+    const items: RenderItem[] = []
+    let cacheHits = 0
+    let cacheMisses = 0
+
+    for (const { id, entity, bounds } of candidates) {
       const cached = this.geomCache.get(id)
       if (
         cached &&
@@ -296,13 +372,14 @@ export class SceneProjector {
     }
 
     this.dirty = false
-    this.lastCamera = {
+    this.lastBuildCamera = {
       x: state.x,
       y: state.y,
       zoom: state.zoom,
       vw: state.viewportWidth,
       vh: state.viewportHeight,
     }
+    this.lastSearchView = searchView
     const result: SceneBuildResult = {
       items,
       stats: {
@@ -334,22 +411,31 @@ export class SceneProjector {
     return this.pickIds.get(id)
   }
 
+  /**
+   * Document stack order for hit-testing / draw priority.
+   * Matches RenderItem.zOrder: panel-top layers win; within a layer, lower stack index wins (front).
+   */
+  getStackOrder(id: EntityId): number {
+    const entity = this.doc.getEntity(id)
+    if (!entity) return 0
+    const layerIndex = this.doc.getLayerIndex(entity.layerId)
+    const layerBand =
+      layerIndex < 0 ? 0 : (this.layerCountCache - 1 - layerIndex) * 1_000_000
+    const idx = this.doc.getEntityStackIndex(id)
+    const count = this.doc.getEntityOrderCount(entity.layerId)
+    const within = idx < 0 || count <= 0 ? 0 : count - 1 - idx
+    return layerBand + (within & 0xfffff)
+  }
+
+  /** Call after entity stack reorder (same invalidation as layer style changes). */
+  notifyStackChanged(): void {
+    this.notifyLayersChanged()
+  }
+
   private resolveEntityPaint(entity: Entity): { stroke: string; fill?: string; strokeWidth: number } {
     const layer = this.doc.getLayer(entity.layerId)
-    // Prefer entity paint; fall back to layer color so new/unpainted items inherit layer tint.
-    const stroke = entity.style.stroke ?? layer?.color ?? '#32cd79'
-    const strokeWidth = entity.style.strokeWidth ?? 1
-    const rawFill = entity.style.fill
-    const hasFill =
-      !!rawFill &&
-      rawFill !== 'none' &&
-      rawFill !== 'transparent' &&
-      !/00$/i.test(rawFill)
-    const fill =
-      hasFill || rawFill === undefined
-        ? (rawFill ?? (layer?.color ? layerFillFromStroke(layer.color) : undefined))
-        : rawFill
-    return { stroke, fill, strokeWidth }
+    // Layer engraver mode: line → stroke only; fill → fill only (ignore the other).
+    return resolveLayerAwarePaint(layer, entity.style)
   }
 
   private projectEntity(
@@ -362,15 +448,11 @@ export class SceneProjector {
     const paint = this.resolveEntityPaint(entity)
     const styleKey = `${paint.stroke}|${paint.strokeWidth}|${paint.fill ?? ''}|${entity.layerId}`
     const pickId = this.pickIds.get(entity.id) ?? 0
-    // Panel top (index 0) draws in front: invert index into a large z band.
-    const layerIndex = this.doc.getLayerIndex(entity.layerId)
-    const layerCount = Math.max(1, this.doc.getLayers().length)
-    const layerBand =
-      layerIndex < 0 ? 0 : (layerCount - 1 - layerIndex) * 1_000_000
     const hasHoles = entity.type === 'polyline' && !!entity.holes?.length
     const base = {
       id: entity.id,
-      zOrder: layerBand + (pickId & 0xfffff),
+      // Panel top (index 0) draws in front — see getStackOrder().
+      zOrder: this.getStackOrder(entity.id),
       styleKey,
       stroke: paint.stroke,
       strokeWidth: paint.strokeWidth,
@@ -412,6 +494,24 @@ export class SceneProjector {
         ]
       }
       case 'polyline': {
+        // Axis-aligned rects → compact GPU instances (huge win for million-square seeds).
+        const rounded = entity.shape?.cornerRadii
+        const hasRound =
+          rounded != null &&
+          (typeof rounded === 'number'
+            ? rounded > 0
+            : rounded.some((r) => (r ?? 0) > 0))
+        if (
+          entity.closed &&
+          !entity.holes?.length &&
+          !hasRound &&
+          (entity.shape?.kind === 'rect' || entity.shape?.kind === undefined)
+        ) {
+          const inst = worldAxisAlignedRectInstance(entity.points, true, (x, y) => wp(x, y))
+          if (inst) {
+            return [{ ...base, kind: 'instance', coords: inst }]
+          }
+        }
         const items: RenderItem[] = [
           {
             ...base,
@@ -469,6 +569,19 @@ export class SceneProjector {
           pixelError,
           worldPerPixel,
         )
+        // Filled arcs → closed pie (center + rim) so fill survives circle→arc.
+        if (base.fill && pts.length >= 2) {
+          const coords = new Float64Array((pts.length + 2) * 2)
+          coords[0] = center.x
+          coords[1] = center.y
+          pts.forEach((p, i) => {
+            coords[(i + 1) * 2] = p.x
+            coords[(i + 1) * 2 + 1] = p.y
+          })
+          coords[(pts.length + 1) * 2] = center.x
+          coords[(pts.length + 1) * 2 + 1] = center.y
+          return [{ ...base, kind: 'polyline', coords }]
+        }
         const coords = new Float64Array(pts.length * 2)
         pts.forEach((p, i) => {
           coords[i * 2] = p.x
@@ -477,13 +590,40 @@ export class SceneProjector {
         return [{ ...base, kind: 'arc', coords }]
       }
       case 'ellipse': {
-        const segments = Math.max(24, Math.ceil(64 / Math.max(worldPerPixel, 1e-6)))
-        const coords = new Float64Array((segments + 1) * 2)
-        for (let i = 0; i <= segments; i++) {
-          const t = (i / segments) * Math.PI * 2
-          const lx = entity.center.x + entity.radiusX * Math.cos(t) * Math.cos(entity.rotation) - entity.radiusY * Math.sin(t) * Math.sin(entity.rotation)
-          const ly = entity.center.y + entity.radiusX * Math.cos(t) * Math.sin(entity.rotation) + entity.radiusY * Math.sin(t) * Math.cos(entity.rotation)
-          const q = wp(lx, ly)
+        let sweep = entity.endAngle - entity.startAngle
+        while (sweep <= 0) sweep += Math.PI * 2
+        while (sweep > Math.PI * 2) sweep -= Math.PI * 2
+        const full = sweep >= Math.PI * 2 - 1e-3
+        const segments = Math.max(24, Math.ceil((full ? 64 : 64 * (sweep / (Math.PI * 2))) / Math.max(worldPerPixel, 1e-6)))
+        const rimCount = segments + 1
+        const cosR = Math.cos(entity.rotation)
+        const sinR = Math.sin(entity.rotation)
+        const rim = (t: number) => {
+          const a = entity.startAngle + sweep * t
+          const lx = entity.radiusX * Math.cos(a)
+          const ly = entity.radiusY * Math.sin(a)
+          return wp(
+            entity.center.x + lx * cosR - ly * sinR,
+            entity.center.y + lx * sinR + ly * cosR,
+          )
+        }
+        if (!full && base.fill) {
+          const center = wp(entity.center.x, entity.center.y)
+          const coords = new Float64Array((rimCount + 2) * 2)
+          coords[0] = center.x
+          coords[1] = center.y
+          for (let i = 0; i < rimCount; i++) {
+            const q = rim(i / segments)
+            coords[(i + 1) * 2] = q.x
+            coords[(i + 1) * 2 + 1] = q.y
+          }
+          coords[(rimCount + 1) * 2] = center.x
+          coords[(rimCount + 1) * 2 + 1] = center.y
+          return [{ ...base, kind: 'polyline', coords }]
+        }
+        const coords = new Float64Array(rimCount * 2)
+        for (let i = 0; i < rimCount; i++) {
+          const q = rim(i / Math.max(segments, 1))
           coords[i * 2] = q.x
           coords[i * 2 + 1] = q.y
         }
@@ -493,14 +633,40 @@ export class SceneProjector {
         if (aabbWidth(bounds) / worldPerPixel < 4 || aabbHeight(bounds) / worldPerPixel < 4) {
           return []
         }
-        const pos = wp(entity.position.x, entity.position.y)
-        return [
-          {
+        // Vector glyph outlines → closed polylines (same hairline stroke / fill
+        // path as other geometry). Empty while canvas/fonts unavailable.
+        const outlines = textEntityToLocalOutlines(entity)
+        if (!outlines.length) return []
+        const items: RenderItem[] = []
+        for (const contour of outlines) {
+          const pts = contour.points
+          if (pts.length < 2) continue
+          let area = 0
+          for (let i = 0, n = pts.length; i < n; i++) {
+            const p = pts[i]!
+            const q = pts[(i + 1) % n]!
+            area += p.x * q.y - q.x * p.y
+          }
+          // Holes (negative area): stroke-only until even-odd fill exists.
+          const isHole = area < 0
+          const n = pts.length
+          const coords = new Float64Array((n + 1) * 2)
+          for (let i = 0; i < n; i++) {
+            const q = wp(pts[i]!.x, pts[i]!.y)
+            coords[i * 2] = q.x
+            coords[i * 2 + 1] = q.y
+          }
+          const q0 = wp(pts[0]!.x, pts[0]!.y)
+          coords[n * 2] = q0.x
+          coords[n * 2 + 1] = q0.y
+          items.push({
             ...base,
-            kind: 'text',
-            coords: new Float64Array([pos.x, pos.y, entity.fontSize]),
-          },
-        ]
+            kind: 'polyline',
+            fill: isHole ? undefined : paint.fill,
+            coords,
+          })
+        }
+        return items
       }
       case 'image': {
         const o = wp(entity.origin.x, entity.origin.y)

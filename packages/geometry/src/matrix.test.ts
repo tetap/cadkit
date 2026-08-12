@@ -79,4 +79,16 @@ describe('Camera2D', () => {
     expect(after.x).toBeCloseTo(before.x, 5)
     expect(after.y).toBeCloseTo(before.y, 5)
   })
+
+  it('setTopLeft places viewport origin in world', () => {
+    const cam = new Camera2D()
+    cam.setViewport(800, 600)
+    cam.setZoom(2)
+    cam.setTopLeft(worldPoint(100, 50))
+    const view = cam.getVisibleWorldBounds()
+    expect(view.minX).toBeCloseTo(100, 5)
+    expect(view.minY).toBeCloseTo(50, 5)
+    expect(view.maxX).toBeCloseTo(100 + 800 / 2, 5)
+    expect(view.maxY).toBeCloseTo(50 + 600 / 2, 5)
+  })
 })

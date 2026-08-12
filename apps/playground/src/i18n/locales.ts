@@ -43,7 +43,9 @@ export type MessageKey =
   | 'hitModeBounds'
   | 'hitModeGeometry'
   | 'alignSnap'
+  | 'gridSnap'
   | 'angleSnap'
+  | 'snapHint'
   | 'tipGroup'
   | 'tipUngroup'
   | 'runBench'
@@ -71,6 +73,10 @@ export type MessageKey =
   | 'imageUrl'
   | 'exportSvg'
   | 'exportJson'
+  | 'exportGcode'
+  | 'gcodePreview'
+  | 'gcodePreviewOn'
+  | 'gcodePaths'
   | 'sideSlotHint'
   | 'offset'
   | 'offsetDirection'
@@ -114,18 +120,25 @@ export type MessageKey =
   | 'layerMoveSelection'
   | 'layerReorder'
   | 'layerDropHint'
+  | 'entityBringToFront'
+  | 'entityBringForward'
+  | 'entitySendBackward'
+  | 'entitySendToBack'
+  | 'entityReorder'
   | 'layerGcode'
   | 'layerGcodeEmpty'
   | 'layerGcodeHint'
   | 'engraveMode'
   | 'engraveLine'
   | 'engraveFill'
+  | 'engraveImage'
+  | 'engraveImageHint'
   | 'lineSpacing'
   | 'fillStyle'
   | 'fillBidirectional'
   | 'fillCrossHatch'
-  | 'fillShapesIndividually'
-  | 'fillOffset'
+  | 'fillAngle'
+  | 'fillAngleHint'
   | 'machineParams'
   | 'laserPower'
   | 'feedSpeed'
@@ -163,6 +176,24 @@ export type MessageKey =
   | 'effects'
   | 'effectsDisabled'
   | 'effectsHint'
+  | 'imageAdjust'
+  | 'imageAdjustHint'
+  | 'toneMode'
+  | 'toneNone'
+  | 'toneGrayscale'
+  | 'toneFloyd'
+  | 'toneThreshold'
+  | 'thresholdCutoff'
+  | 'adjBrightness'
+  | 'adjContrast'
+  | 'adjSaturation'
+  | 'mirror'
+  | 'mirrorH'
+  | 'mirrorV'
+  | 'toolHeart'
+  | 'toolStar'
+  | 'tipHeart'
+  | 'tipStar'
   | 'addFilter'
   | 'resetFilters'
   | 'noFilters'
@@ -266,8 +297,10 @@ const zh: Record<MessageKey, string> = {
   hitMode: '选区命中',
   hitModeBounds: 'AABB框内',
   hitModeGeometry: '仅几何',
-  alignSnap: '对齐吸附',
-  angleSnap: '角度吸附',
+  alignSnap: '对象对齐',
+  gridSnap: '网格吸附',
+  angleSnap: '旋转角度吸附',
+  snapHint: '拖拽时对齐其他对象边/中心；网格吸附对准网格；旋转按角度步进',
   tipGroup: '将当前多选对象打成一组',
   tipUngroup: '解除选中组的编组',
   runBench: '运行尖峰基准',
@@ -295,6 +328,10 @@ const zh: Record<MessageKey, string> = {
   imageUrl: '图片 URL',
   exportSvg: '导出 SVG',
   exportJson: '导出 JSON',
+  exportGcode: '导出 G-code',
+  gcodePreview: '预览 G-code',
+  gcodePreviewOn: 'G-code 预览中',
+  gcodePaths: '段',
   sideSlotHint: '侧栏预留区域',
   offset: '偏移',
   offsetDirection: '方向',
@@ -328,7 +365,7 @@ const zh: Record<MessageKey, string> = {
   svgDpi: 'SVG DPI',
   settingsDpiReset: '恢复默认 (96 / 72)',
   layers: '图层',
-  layersHint: '拖拽 ⋮⋮ 调整图层顺序；拖拽元素到其他图层可换层。',
+  layersHint: '拖拽 ⋮⋮ 调整图层顺序；拖拽元素排序或换层；右键调整层级。',
   layer: '图层',
   layerAdd: '新建图层',
   layerDelete: '删除图层',
@@ -337,19 +374,26 @@ const zh: Record<MessageKey, string> = {
   layerActive: '当前',
   layerMoveSelection: '将选中移到当前图层',
   layerReorder: '拖拽调整图层顺序',
-  layerDropHint: '拖到其他图层可换层',
+  layerDropHint: '拖到其他图层可换层；同层拖拽可排序',
+  entityBringToFront: '移动到最上级',
+  entityBringForward: '上一级',
+  entitySendBackward: '下一级',
+  entitySendToBack: '移动到最下级',
+  entityReorder: '拖拽调整元素顺序',
   layerGcode: '雕刻参数',
-  layerGcodeEmpty: '在左侧图层面板中选择一个图层，以编辑 GRBL / G-code 参数。',
-  layerGcodeHint: '参数仅作用于图层，用于后续 G-code 导出；不影响画布渲染。',
+  layerGcodeEmpty: '暂无图层可编辑雕刻参数。',
+  layerGcodeHint: '线雕刻只显示描边（忽略填充）；填充雕刻只显示填充（忽略描边）。机床参数用于 G-code 导出。',
   engraveMode: '雕刻方式',
   engraveLine: '线雕刻',
   engraveFill: '填充雕刻',
+  engraveImage: '图像图层',
+  engraveImageHint: '仅存放图片，不参与线/填充雕刻。图片不能拖到雕刻图层。',
   lineSpacing: '线间距',
   fillStyle: '填充路径样式',
-  fillBidirectional: 'Bi-directional Fill（双向填充）',
-  fillCrossHatch: 'Cross-Hatch（交叉/网格填充）',
-  fillShapesIndividually: 'Fill Shapes Individually（单独填充图形）',
-  fillOffset: 'Offset Fill（偏移填充）',
+  fillBidirectional: '双向填充',
+  fillCrossHatch: '交叉网格',
+  fillAngle: '填充角度',
+  fillAngleHint: '0° 为水平；交叉网格会再扫一遍 +90°',
   machineParams: '机床参数',
   laserPower: '功率',
   feedSpeed: '速度',
@@ -384,9 +428,27 @@ const zh: Record<MessageKey, string> = {
   size: '尺寸',
   transform: '变换',
   boundsHint: '位置/尺寸为包围盒参考（部分类型只读展示）',
-  effects: '效果',
-  effectsDisabled: '请单选一张图片以编辑滤镜栈',
-  effectsHint: '内置滤镜与自定义 WGSL 按顺序应用',
+  effects: '图像调节',
+  effectsDisabled: '请单选一张图片以调节',
+  effectsHint: '基础调节与互斥色调模式',
+  imageAdjust: '图像调节',
+  imageAdjustHint: '不透明度请在样式中调整',
+  toneMode: '滤镜',
+  toneNone: '无',
+  toneGrayscale: '灰度',
+  toneFloyd: 'Floyd',
+  toneThreshold: '二值化',
+  thresholdCutoff: '阈值',
+  adjBrightness: '亮度',
+  adjContrast: '对比度',
+  adjSaturation: '饱和度',
+  mirror: '镜像',
+  mirrorH: '水平镜像',
+  mirrorV: '垂直镜像',
+  toolHeart: '爱心',
+  toolStar: '星星',
+  tipHeart: '拖拽绘制爱心轮廓',
+  tipStar: '拖拽绘制星形',
   addFilter: '添加',
   resetFilters: '重置',
   noFilters: '无滤镜',
@@ -492,8 +554,10 @@ const en: Record<MessageKey, string> = {
   hitMode: 'Hit mode',
   hitModeBounds: 'Inside AABB',
   hitModeGeometry: 'Geometry only',
-  alignSnap: 'Align snap',
-  angleSnap: 'Angle snap',
+  alignSnap: 'Object align',
+  gridSnap: 'Grid snap',
+  angleSnap: 'Rotation angle snap',
+  snapHint: 'Drag aligns to other edges/centers; grid snaps to grid; rotate uses angle steps',
   tipGroup: 'Group the current multi-selection',
   tipUngroup: 'Ungroup the selected group',
   runBench: 'Run spike benchmark',
@@ -521,6 +585,10 @@ const en: Record<MessageKey, string> = {
   imageUrl: 'Image URL',
   exportSvg: 'Export SVG',
   exportJson: 'Export JSON',
+  exportGcode: 'Export G-code',
+  gcodePreview: 'Preview G-code',
+  gcodePreviewOn: 'G-code preview',
+  gcodePaths: 'paths',
   sideSlotHint: 'Reserved side panel',
   offset: 'Offset',
   offsetDirection: 'Direction',
@@ -554,7 +622,7 @@ const en: Record<MessageKey, string> = {
   svgDpi: 'SVG DPI',
   settingsDpiReset: 'Reset defaults (96 / 72)',
   layers: 'Layers',
-  layersHint: 'Drag ⋮⋮ to reorder layers; drag objects onto a layer to move them.',
+  layersHint: 'Drag ⋮⋮ to reorder layers; drag objects to reorder or move layers; right-click for stack order.',
   layer: 'Layer',
   layerAdd: 'Add layer',
   layerDelete: 'Delete layer',
@@ -563,19 +631,26 @@ const en: Record<MessageKey, string> = {
   layerActive: 'Active',
   layerMoveSelection: 'Move selection to active layer',
   layerReorder: 'Drag to reorder layers',
-  layerDropHint: 'Drag onto another layer to move',
+  layerDropHint: 'Drag onto another layer to move; drag within a layer to reorder',
+  entityBringToFront: 'Bring to front',
+  entityBringForward: 'Bring forward',
+  entitySendBackward: 'Send backward',
+  entitySendToBack: 'Send to back',
+  entityReorder: 'Drag to reorder objects',
   layerGcode: 'Engrave params',
-  layerGcodeEmpty: 'Select a layer in the layers panel to edit GRBL / G-code parameters.',
-  layerGcodeHint: 'Layer-only settings for future G-code export; not used for canvas rendering.',
+  layerGcodeEmpty: 'No layer available for engraver parameters.',
+  layerGcodeHint: 'Line mode draws stroke only (ignores fill); fill mode draws fill only (ignores stroke). Machine params are for G-code export.',
   engraveMode: 'Engrave mode',
   engraveLine: 'Line',
   engraveFill: 'Fill',
+  engraveImage: 'Image layer',
+  engraveImageHint: 'Raster-only. Images cannot be moved onto line/fill engraver layers.',
   lineSpacing: 'Line spacing',
   fillStyle: 'Fill path style',
-  fillBidirectional: 'Bi-directional Fill',
-  fillCrossHatch: 'Cross-Hatch',
-  fillShapesIndividually: 'Fill Shapes Individually',
-  fillOffset: 'Offset Fill',
+  fillBidirectional: 'Bidirectional',
+  fillCrossHatch: 'Cross-hatch',
+  fillAngle: 'Fill angle',
+  fillAngleHint: '0° = horizontal; cross-hatch adds a +90° pass',
   machineParams: 'Machine',
   laserPower: 'Power',
   feedSpeed: 'Speed',
@@ -610,9 +685,27 @@ const en: Record<MessageKey, string> = {
   size: 'Size',
   transform: 'Transform',
   boundsHint: 'Position/size from bounds (read-only for some types)',
-  effects: 'Effects',
-  effectsDisabled: 'Select a single image to edit the filter stack',
-  effectsHint: 'Builtin and custom WGSL filters applied in order',
+  effects: 'Image adjust',
+  effectsDisabled: 'Select a single image to adjust',
+  effectsHint: 'Basic adjustments and exclusive tone modes',
+  imageAdjust: 'Image adjust',
+  imageAdjustHint: 'Use style controls for opacity',
+  toneMode: 'Filter',
+  toneNone: 'None',
+  toneGrayscale: 'Grayscale',
+  toneFloyd: 'Floyd',
+  toneThreshold: 'Threshold',
+  thresholdCutoff: 'Cutoff',
+  adjBrightness: 'Brightness',
+  adjContrast: 'Contrast',
+  adjSaturation: 'Saturation',
+  mirror: 'Mirror',
+  mirrorH: 'Horizontal',
+  mirrorV: 'Vertical',
+  toolHeart: 'Heart',
+  toolStar: 'Star',
+  tipHeart: 'Drag to draw a heart',
+  tipStar: 'Drag to draw a star',
   addFilter: 'Add',
   resetFilters: 'Reset',
   noFilters: 'No filters',

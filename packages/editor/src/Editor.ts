@@ -44,11 +44,16 @@ import {
   type BooleanOptions,
   type LengthUnit as GeomUnit,
   type OffsetOptions,
+  clearTextOutlineCache,
 } from '@cadkit/geometry'
 import {
   CadDocument,
   ChunkStore,
+  DEFAULT_LAYER_GCODE,
+  isImageLayer,
+  layerAcceptsEntity,
   layerFillFromStroke,
+  resolveLayerGcode,
   type Layer,
 } from '@cadkit/document'
 import {
@@ -58,12 +63,18 @@ import {
   HistoryStack,
   MutateEntitiesCommand,
   RemoveEntityCommand,
+  ReorderEntitiesCommand,
   UngroupCommand,
   UpdateEntityCommand,
 } from '@cadkit/commands'
 import type { DocumentChange } from '@cadkit/document'
 import { SceneProjector } from '@cadkit/scene'
-import type { FrameMetrics, RendererBackend } from '@cadkit/render-core'
+import {
+  DirtyRegionTracker,
+  type FrameMetrics,
+  type RendererBackend,
+  type ScreenRect,
+} from '@cadkit/render-core'
 import { WebGPURenderer } from '@cadkit/render-webgpu'
 import {
   HandleOverlay,
@@ -73,6 +84,11 @@ import {
   buildTransformHandles,
   anchorsToCubicPoints,
   createBuiltinTools,
+  aabbCenter,
+  patchesFromMatrix,
+  pickEntity,
+  scaleMatrixAbout,
+  selectionWorldBounds,
   type AlignGuide,
   type PreviewPrimitive,
   type TextDraftState,
@@ -80,8 +96,15 @@ import {
 } from '@cadkit/interaction'
 import { ImeTextEditor } from '@cadkit/text'
 import { AssetRegistry, createFilterId, type FilterOp } from '@cadkit/assets'
-import { parseSvg, exportSvg } from '@cadkit/io-svg'
+import { parseSvg, exportSvgDocument } from '@cadkit/io-svg'
 import { importDxf } from '@cadkit/io-dxf'
+import {
+  buildToolpaths,
+  exportGcode,
+  importGcode,
+  type GcodeExportOptions,
+  type GcodeToolpathPlan,
+} from '@cadkit/io-gcode'
 import { detectCapabilities, ensureEditorHost, resolveView } from '@cadkit/platform-web'
 import { WORKER_ABI } from '@cadkit/worker-runtime'
 import {
@@ -90,6 +113,7 @@ import {
   DEFAULT_GRID_STYLE,
   LIGHT_RULER_THEME,
   RulerOverlay,
+  ScrollbarOverlay,
   buildGridGeometry,
 } from '@cadkit/guides'
 import { PluginHost, type EditorPlugin } from './plugin.js'
@@ -110,11 +134,17 @@ export class Editor {
   readonly import: {
     svg: (source: string, opts?: { signal?: AbortSignal }) => Promise<void>
     dxf: (source: string | File, opts?: { signal?: AbortSignal }) => Promise<void>
+    gcode: (source: string | File, opts?: { signal?: AbortSignal }) => Promise<void>
     image: (source: File | Blob | string) => Promise<EntityId | null>
   }
   readonly export: {
+    /** SVG matching canvas paint (world space + layer line/fill mode). */
     svg: () => string
     json: () => string
+    /** GRBL laser G-code using per-layer engraver params. */
+    gcode: (opts?: GcodeExportOptions) => string
+    /** Optimized toolpath plan (CAD space) for preview / scrubbing. */
+    toolpaths: (opts?: GcodeExportOptions) => GcodeToolpathPlan
   }
 
   private lifecycle: EditorLifecycle = 'created'
@@ -122,6 +152,7 @@ export class Editor {
   private canvas: HTMLCanvasElement | null = null
   private renderer: RendererBackend | null = null
   private rulers: RulerOverlay | null = null
+  private scrollbars: ScrollbarOverlay | null = null
   private handleOverlay: HandleOverlay | null = null
   private capabilities: CapabilityReport | null = null
   private raf = 0
@@ -148,6 +179,14 @@ export class Editor {
   private textOverlay: TextOverlay | null = null
   private ime: ImeTextEditor | null = null
   private placeImageHandler: ((world: { x: number; y: number }) => void) | null = null
+  private readonly onFontsSettled = (): void => {
+    // Drop fallback-face outlines; rebuild GPU text paths + live offset preview.
+    clearTextOutlineCache()
+    this.scene.invalidateGeometryCache()
+    if (this.liveOffsetOptions) this.rebuildLiveOffsetPreview()
+    this.refreshTextOverlay()
+    this.requestRender()
+  }
 
   private constructor(config: EditorConfig) {
     this.config = config
@@ -201,7 +240,8 @@ export class Editor {
       onSelectionEdited: () => {
         this.events.emit('selection:change', { ids: this.selection.toArray() })
         this.refreshHandles()
-        this.rebuildLiveOffsetPreview()
+        // Keep offset dialog preview glued to the moving selection.
+        if (this.liveOffsetOptions) this.rebuildLiveOffsetPreview()
         this.requestRender()
       },
       onCameraChanged: () => {
@@ -217,7 +257,7 @@ export class Editor {
       },
       onPreview: (preview) => {
         // Drawing-tool rubber bands replace any live offset preview session.
-        this.liveOffsetOptions = null
+        if (preview.kind !== 'none') this.liveOffsetOptions = null
         this.preview = preview
         this.refreshPreview()
       },
@@ -230,6 +270,7 @@ export class Editor {
           const b = Math.max(0, Math.min(selEnd, content.length))
           this.textOverlay?.setDraft({
             entityId: opts.entityId ?? null,
+            layerId: opts.layerId,
             content,
             caret: b,
             selStart: a,
@@ -324,11 +365,35 @@ export class Editor {
     this.import = {
       svg: (source, opts) => this.importSvg(source, opts),
       dxf: (source, opts) => this.importDxf(source, opts),
+      gcode: (source, opts) => this.importGcode(source, opts),
       image: async (source: File | Blob | string) => this.importImage(source),
     }
     this.export = {
-      svg: () => exportSvg(this.document.getEntities()),
+      svg: () =>
+        exportSvgDocument({
+          entities: this.document.getEntities(),
+          layers: this.document.getLayers(),
+          getEntity: (id) => this.document.getEntity(id),
+        }),
       json: () => JSON.stringify(this.document.toJSON(), null, 2),
+      gcode: (opts) =>
+        exportGcode(
+          {
+            entities: this.document.getEntities(),
+            layers: this.document.getLayers(),
+            getEntity: (id) => this.document.getEntity(id),
+          },
+          opts,
+        ),
+      toolpaths: (opts) =>
+        buildToolpaths(
+          {
+            entities: this.document.getEntities(),
+            layers: this.document.getLayers(),
+            getEntity: (id) => this.document.getEntity(id),
+          },
+          opts,
+        ),
     }
   }
 
@@ -477,12 +542,15 @@ export class Editor {
     if (patch.color && patch.color !== prev?.color) {
       this.recolorLayerEntities(id, patch.color)
     }
-    // G-code params are export-only; skip scene rebuild when nothing visual changed.
+    // `gcode.mode` changes canvas paint (line = stroke only / fill = fill only).
+    const modeChanged =
+      patch.gcode?.mode !== undefined && patch.gcode.mode !== resolveLayerGcode(prev).mode
     const visualChange =
       patch.visible !== undefined ||
       patch.color !== undefined ||
       patch.name !== undefined ||
-      patch.locked !== undefined
+      patch.locked !== undefined ||
+      modeChanged
     if (visualChange) {
       this.scene.notifyLayersChanged()
       this.refreshTextOverlay()
@@ -507,6 +575,80 @@ export class Editor {
     return next
   }
 
+  /** Front-to-back entity ids on a layer (index 0 = front). */
+  getEntityOrder(layerId: LayerId): EntityId[] {
+    return this.document.getEntityOrder(layerId)
+  }
+
+  /** Reorder entities on one layer (undoable). Panel top = front. */
+  reorderEntitiesInLayer(layerId: LayerId, orderedIds: readonly EntityId[]): EntityId[] {
+    const change = this.history.execute(
+      new ReorderEntitiesCommand('reorder', [], layerId, orderedIds),
+    )
+    if (change) {
+      this.scene.notifyStackChanged()
+      this.requestRender()
+    }
+    return this.document.getEntityOrder(layerId)
+  }
+
+  bringSelectionToFront(): boolean {
+    return this.applyStackOp('front')
+  }
+
+  sendSelectionToBack(): boolean {
+    return this.applyStackOp('back')
+  }
+
+  bringSelectionForward(): boolean {
+    return this.applyStackOp('forward')
+  }
+
+  sendSelectionBackward(): boolean {
+    return this.applyStackOp('backward')
+  }
+
+  bringEntitiesToFront(ids: readonly EntityId[]): boolean {
+    return this.applyStackOp('front', ids)
+  }
+
+  sendEntitiesToBack(ids: readonly EntityId[]): boolean {
+    return this.applyStackOp('back', ids)
+  }
+
+  bringEntitiesForward(ids: readonly EntityId[]): boolean {
+    return this.applyStackOp('forward', ids)
+  }
+
+  sendEntitiesBackward(ids: readonly EntityId[]): boolean {
+    return this.applyStackOp('backward', ids)
+  }
+
+  private applyStackOp(
+    op: 'front' | 'back' | 'forward' | 'backward',
+    ids?: readonly EntityId[],
+  ): boolean {
+    const targets = ids ?? this.selection.toArray()
+    if (!targets.length) return false
+    const change = this.history.execute(new ReorderEntitiesCommand(op, targets))
+    if (!change) return false
+    this.scene.notifyStackChanged()
+    this.requestRender()
+    return true
+  }
+
+  /** Hit-test at a client (viewport) point; used by context menus. */
+  pickAtClient(clientX: number, clientY: number): EntityId | null {
+    if (!this.canvas) return null
+    const screen = this.toScreen({ clientX, clientY })
+    const world = this.camera.screenToWorld(screen)
+    return pickEntity(
+      { doc: this.document, camera: this.camera, scene: this.scene },
+      world,
+      screen,
+    )
+  }
+
   /** Move current selection onto a layer and tint with that layer's color. */
   moveSelectionToLayer(layerId: LayerId): void {
     this.moveEntitiesToLayer(this.selection.toArray(), layerId)
@@ -517,10 +659,15 @@ export class Editor {
     const layer = this.document.getLayer(layerId)
     if (!layer || !ids.length) return
     const color = layer.color ?? '#32cd79'
+    let moved = false
     for (const id of ids) {
       const e = this.document.getEntity(id)
-      if (!e || e.type === 'group' || e.type === 'image') {
-        if (e && e.type !== 'group') this.updateEntity(id, { layerId } as Partial<Entity>)
+      if (!e || e.type === 'group') continue
+      // Image layers are raster-only; vector engraver layers reject images.
+      if (!layerAcceptsEntity(layer, e)) continue
+      if (e.type === 'image') {
+        this.updateEntity(id, { layerId } as Partial<Entity>, 'layer-move')
+        moved = true
         continue
       }
       const hasFill =
@@ -539,9 +686,28 @@ export class Editor {
         } as Partial<Entity>,
         'layer-move',
       )
+      moved = true
     }
+    if (!moved) return
     this.events.emit('selection:change', { ids: this.selection.toArray() })
     this.requestRender()
+  }
+
+  /** Find or create a dedicated image layer (does not steal the active vector layer). */
+  ensureImageLayer(): Layer {
+    for (const layer of this.document.getLayers()) {
+      if (isImageLayer(layer)) return layer
+    }
+    const activeId = this.document.getDefaultLayerId()
+    const layer = this.document.addLayer({ name: 'Image', color: '#64748b' })
+    this.document.updateLayer(layer.id, {
+      gcode: { ...DEFAULT_LAYER_GCODE, mode: 'image' },
+    })
+    // Keep the previous active layer so drawing tools stay on vector layers.
+    this.document.setDefaultLayerId(activeId)
+    this.scene.notifyLayersChanged()
+    this.requestRender()
+    return this.document.getLayer(layer.id) ?? layer
   }
 
   private recolorLayerEntities(layerId: LayerId, color: string): void {
@@ -709,6 +875,47 @@ export class Editor {
     this.requestRender()
   }
 
+  /**
+   * Mirror the current selection about its AABB center (horizontal = flip X,
+   * vertical = flip Y). Groups accumulate on transform; leaves bake geometry.
+   */
+  mirrorSelection(axis: 'horizontal' | 'vertical'): void {
+    const ids = this.selection.toArray()
+    if (!ids.length) return
+    const lookup = (id: EntityId) => this.document.getEntity(id)
+    const entities = ids
+      .map((id) => lookup(id))
+      .filter((e): e is Entity => !!e && !e.style.locked)
+    if (!entities.length) return
+    const box = selectionWorldBounds(entities, lookup)
+    if (!box || !isValidAABB(box)) return
+    const center = aabbCenter(box)
+    const sx = axis === 'horizontal' ? -1 : 1
+    const sy = axis === 'vertical' ? -1 : 1
+    const m = scaleMatrixAbout(center, sx, sy)
+    const snapshots = new Map(entities.map((e) => [e.id, e] as const))
+    const patches = patchesFromMatrix(snapshots, m, lookup)
+    if (!patches.size) return
+    // Mirror rect corner radii order when present.
+    for (const [id, patch] of patches) {
+      const src = snapshots.get(id)
+      if (src?.type !== 'polyline' || !src.shape || src.shape.kind !== 'rect') continue
+      const radii = src.shape.cornerRadii
+      if (radii == null || typeof radii === 'number') continue
+      const [tl, tr, br, bl] = radii
+      const next =
+        axis === 'horizontal' ? ([tr, tl, bl, br] as const) : ([bl, br, tr, tl] as const)
+      const shape = { ...src.shape, cornerRadii: next }
+      ;(patch as Partial<Entity> & { shape?: unknown }).shape = shape
+    }
+    const change = this.history.execute(
+      new MutateEntitiesCommand(patches, `mirror:${axis}:${Date.now()}`),
+    )
+    this.commitSceneChange(change)
+    this.refreshHandles()
+    this.requestRender()
+  }
+
   applyStyle(id: EntityId, style: Entity['style']): void {
     const prev = this.document.getEntity(id)
     if (!prev) return
@@ -729,10 +936,30 @@ export class Editor {
     this.refreshPreview()
   }
 
+  /** Whether an offset dialog is driving a live preview session. */
+  hasLiveOffsetPreview(): boolean {
+    return this.liveOffsetOptions != null
+  }
+
+  /**
+   * Clear drawn preview geometry. Does **not** end a live offset session, so
+   * moving the selection can still rebuild the offset outline.
+   */
+  clearPreviewGeometry(): void {
+    this.preview = { kind: 'none' }
+    this.refreshPreview()
+  }
+
+  /** Clear preview and end any live offset / boolean preview session. */
   clearPreview(): void {
     this.liveOffsetOptions = null
     this.preview = { kind: 'none' }
     this.refreshPreview()
+  }
+
+  /** Recompute live offset preview from the current document selection. */
+  refreshLiveOffsetPreview(): number {
+    return this.rebuildLiveOffsetPreview()
   }
 
   /**
@@ -745,7 +972,7 @@ export class Editor {
     const lookup = (id: EntityId) => this.document.getEntity(id)
     const entities = ids
       .map((id) => this.document.getEntity(id))
-      .filter((e): e is Entity => !!e && e.type !== 'group')
+      .filter((e): e is Entity => !!e)
     const contours = offsetEntities(entities, options, lookup)
     if (!contours.length) return []
 
@@ -795,7 +1022,7 @@ export class Editor {
     const lookup = (id: EntityId) => this.document.getEntity(id)
     const entities = ids
       .map((id) => this.document.getEntity(id))
-      .filter((e): e is Entity => !!e && e.type !== 'group')
+      .filter((e): e is Entity => !!e)
     const contours = offsetEntities(entities, options, lookup)
     if (!contours.length) {
       this.preview = { kind: 'none' }
@@ -942,6 +1169,10 @@ export class Editor {
     this.canvas?.removeEventListener('wheel', this.onWheel)
     window.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('keyup', this.onKeyUp)
+    if (typeof document !== 'undefined' && document.fonts) {
+      document.fonts.removeEventListener('loadingdone', this.onFontsSettled)
+    }
+    clearTextOutlineCache()
     this.plugins.dispose()
     this.handleOverlay?.dispose()
     this.handleOverlay = null
@@ -953,6 +1184,8 @@ export class Editor {
     this.ime = null
     this.rulers?.dispose()
     this.rulers = null
+    this.scrollbars?.dispose()
+    this.scrollbars = null
     this.renderer?.dispose()
     this.renderer = null
     this.setLifecycle('disposed')
@@ -980,8 +1213,18 @@ export class Editor {
       })
     }
 
+    this.scrollbars = new ScrollbarOverlay(this.host, {
+      theme: this.config.theme === 'dark' ? 'dark' : 'light',
+      onNavigate: (minX, minY) => {
+        this.camera.setTopLeft(worldPoint(minX, minY))
+        this.notifyCameraChanged()
+      },
+    })
+    this.syncScrollbars()
+
     this.renderer = new WebGPURenderer()
     await this.renderer.initialize(canvas)
+    this.lastPresentCam = null
     this.renderer.setTextureResolver?.({
       getBitmap: (id) => this.assets.get(id as never)?.bitmap ?? null,
       getStatus: (id) => this.assets.get(id as never)?.status,
@@ -991,10 +1234,17 @@ export class Editor {
     this.textOverlay = new TextOverlay(this.host)
     this.bindInput()
     this.bindResize()
+    this.bindFontLoading()
     this.syncToolCursor()
     this.setLifecycle('ready')
     this.setLifecycle('running')
     this.requestRender()
+  }
+
+  private bindFontLoading(): void {
+    if (typeof document === 'undefined' || !document.fonts) return
+    document.fonts.addEventListener('loadingdone', this.onFontsSettled)
+    void document.fonts.ready.then(() => this.onFontsSettled())
   }
 
   private layoutChrome(): void {
@@ -1027,6 +1277,8 @@ export class Editor {
       this.alignOverlayToCanvas(this.previewLayer)
     }
     this.alignTextOverlayToCanvas()
+    this.scrollbars?.setCanvasBox(this.getCanvasBoxInHost())
+    this.syncScrollbars()
   }
 
   /** Canvas position relative to the overlay host, including borders/fractional layout. */
@@ -1091,9 +1343,12 @@ export class Editor {
     let frameBox = this.tools.getSelectionFrame()?.box ?? null
     let frameRotation = this.tools.getSelectionFrame()?.rotation ?? 0
     if (draft && draftBox) {
+      // draftBox is already a world AABB with rotation baked into corners
+      // (entityWorldBounds). Do NOT apply draft.rotation again — that double-
+      // rotates the selection frame away from the glyph outlines.
       frameBox = draftBox
-      frameRotation = draft.rotation ?? frameRotation
-      handles = buildTransformHandles(draftBox, this.camera, frameRotation)
+      frameRotation = 0
+      handles = buildTransformHandles(draftBox, this.camera, 0)
     }
     this.handleOverlay.update(handles, this.camera, offset, frameBox, frameRotation)
     this.handleOverlay.updateHover(this.tools.getHoverFrame(), this.camera, offset)
@@ -1245,10 +1500,45 @@ export class Editor {
 
   private readonly onWheel = (ev: WheelEvent) => {
     ev.preventDefault()
-    const screen = this.toScreen(ev)
-    const factor = ev.deltaY > 0 ? 0.9 : 1.1
-    this.camera.zoomAt(screen, factor)
+    // Ctrl / ⌘ + wheel (and trackpad pinch, which browsers report as ctrl+wheel) → zoom.
+    if (ev.ctrlKey || ev.metaKey) {
+      const screen = this.toScreen(ev)
+      const intensity = Math.min(Math.abs(ev.deltaY) / 100, 3)
+      const step = Math.pow(1.1, intensity)
+      const factor = ev.deltaY > 0 ? 1 / step : step
+      this.camera.zoomAt(screen, factor)
+      this.notifyCameraChanged()
+      return
+    }
+
+    // Default: scroll / pan the canvas. Shift + vertical wheel → horizontal pan.
+    let dx = ev.deltaX
+    let dy = ev.deltaY
+    if (ev.shiftKey && Math.abs(dy) >= Math.abs(dx)) {
+      dx = dy
+      dy = 0
+    }
+    if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) {
+      dx *= 16
+      dy *= 16
+    } else if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) {
+      const s = this.camera.getState()
+      dx *= s.viewportWidth
+      dy *= s.viewportHeight
+    }
+    if (dx === 0 && dy === 0) return
+    // Natural scroll: wheel down reveals content below.
+    this.camera.pan(-dx, -dy)
     this.notifyCameraChanged()
+  }
+
+  /** Sync overlay scrollbars to document bounds + camera viewport. */
+  private syncScrollbars(): void {
+    if (!this.scrollbars) return
+    const bounds = this.document.getDocumentBounds()
+    this.scrollbars.setContentBounds(isValidAABB(bounds) ? bounds : null)
+    this.scrollbars.setCanvasBox(this.getCanvasBoxInHost())
+    this.scrollbars.update(this.camera)
   }
 
   /** Emit camera event and refresh overlays that bake world→screen (handles / preview / text). */
@@ -1259,8 +1549,10 @@ export class Editor {
       center: { x: s.x, y: s.y, __space: 'world' },
     })
     this.refreshHandles()
+    // Live offset paths are in world space — just reproject to screen.
     this.refreshPreview()
     this.refreshTextOverlay()
+    this.syncScrollbars()
     this.requestRender()
   }
 
@@ -1358,7 +1650,11 @@ export class Editor {
   private refreshTextOverlay(): void {
     if (!this.textOverlay) return
     this.alignTextOverlayToCanvas()
-    this.textOverlay.update(this.document.getEntities(), this.camera)
+    this.textOverlay.update(
+      this.document.getEntities(),
+      this.camera,
+      (layerId) => this.document.getLayer(layerId),
+    )
   }
 
   private syncToolCursor(): void {
@@ -1585,6 +1881,14 @@ export class Editor {
         zoom: number
       }
     | null = null
+  /** Camera snapshot after last GPU present (for dirty / pan-blit). */
+  private lastPresentCam: {
+    x: number
+    y: number
+    zoom: number
+    vw: number
+    vh: number
+  } | null = null
 
   private renderFrame(): void {
     if (!this.renderer) return
@@ -1595,7 +1899,7 @@ export class Editor {
     this.emitPhase('cull')
     const built = this.scene.build(this.camera, this.selection.asReadonly())
     const { items, stats, skipGeometryUpload, mode, revision, lodBin } = built
-    this.scene.consumeDirtyMeta()
+    const dirtyMeta = this.scene.consumeDirtyMeta()
     const state = this.camera.getState()
     const workArea = this.config.guides.workArea
     const pageMode = workArea.mode === 'page'
@@ -1624,10 +1928,11 @@ export class Editor {
     let skipGridUpload = false
     let grid = this.cachedGrid
     if (this.gridVisible || pageMode) {
+      // Rebuild grid only after ~1 CSS-pixel of camera drift (not every pan tick).
       const camMoved =
         !grid ||
         grid.zoom !== state.zoom ||
-        Math.hypot((grid.camX - state.x) * state.zoom, (grid.camY - state.y) * state.zoom) > 0.01
+        Math.hypot((grid.camX - state.x) * state.zoom, (grid.camY - state.y) * state.zoom) > 1
       if (grid && this.gridCacheKey === key && !camMoved) {
         skipGridUpload = true
       } else {
@@ -1664,6 +1969,7 @@ export class Editor {
     }
 
     this.rulers?.update(this.camera)
+    this.syncScrollbars()
     this.refreshTextOverlay()
 
     this.emitPhase('prepare')
@@ -1676,6 +1982,83 @@ export class Editor {
         : pageMode
           ? '#e8eaed'
           : '#ffffff'
+
+    const prevCam = this.lastPresentCam
+    const zoomOrResize =
+      !prevCam ||
+      prevCam.zoom !== state.zoom ||
+      prevCam.vw !== state.viewportWidth ||
+      prevCam.vh !== state.viewportHeight
+    const camPanOnly =
+      !!prevCam &&
+      !zoomOrResize &&
+      (prevCam.x !== state.x || prevCam.y !== state.y)
+    const camStatic = !!prevCam && !zoomOrResize && !camPanOnly
+
+    let dirtyFullscreen = dirtyMeta.fullscreen || zoomOrResize || !prevCam
+    let dirtyScreenRects: ScreenRect[] | undefined
+    let panPixelDelta: { dx: number; dy: number } | undefined
+
+    if (!dirtyFullscreen && camStatic && dirtyMeta.rects.length > 0) {
+      const view = this.camera.getVisibleWorldBounds()
+      const viewArea = Math.max(
+        1,
+        (view.maxX - view.minX) * (view.maxY - view.minY),
+      )
+      const tracker = new DirtyRegionTracker(
+        this.config.performance.maxDirtyRects,
+        this.config.performance.dirtyMergeAreaRatio,
+        viewArea,
+      )
+      for (const r of dirtyMeta.rects) tracker.mark(r)
+      const merged = tracker.consume()
+      if (merged.fullscreen) {
+        dirtyFullscreen = true
+      } else {
+        const padPx = 4
+        dirtyScreenRects = []
+        for (const { bounds } of merged.rects) {
+          const a = this.camera.worldToScreen({
+            x: bounds.minX,
+            y: bounds.minY,
+            __space: 'world',
+          })
+          const b = this.camera.worldToScreen({
+            x: bounds.maxX,
+            y: bounds.maxY,
+            __space: 'world',
+          })
+          const minX = Math.min(a.x, b.x) - padPx
+          const minY = Math.min(a.y, b.y) - padPx
+          const maxX = Math.max(a.x, b.x) + padPx
+          const maxY = Math.max(a.y, b.y) + padPx
+          const w = maxX - minX
+          const h = maxY - minY
+          if (w > 0 && h > 0) dirtyScreenRects.push({ x: minX, y: minY, w, h })
+        }
+        if (dirtyScreenRects.length === 0) dirtyFullscreen = true
+      }
+    } else if (
+      !dirtyFullscreen &&
+      camPanOnly &&
+      mode === 'pan-reuse' &&
+      skipGeometryUpload
+    ) {
+      panPixelDelta = {
+        dx: (prevCam!.x - state.x) * state.zoom,
+        dy: (prevCam!.y - state.y) * state.zoom,
+      }
+    } else if (!dirtyFullscreen && camStatic && dirtyMeta.rects.length === 0) {
+      // No scene/pixel invalidation — present previous target (handles/rulers are DOM).
+      if (skipGeometryUpload && skipGridUpload) {
+        dirtyScreenRects = []
+      } else {
+        dirtyFullscreen = true
+      }
+    } else if (!dirtyFullscreen && camPanOnly && mode !== 'pan-reuse') {
+      dirtyFullscreen = true
+    }
+
     this.lastMetrics = this.renderer.render({
       camera: this.camera,
       items,
@@ -1687,6 +2070,9 @@ export class Editor {
       sceneRevision: revision,
       lodBin,
       mode,
+      dirtyFullscreen,
+      dirtyScreenRects,
+      panPixelDelta,
       textures: {
         getBitmap: (id) => this.assets.get(id as never)?.bitmap ?? null,
         getStatus: (id) => this.assets.get(id as never)?.status,
@@ -1701,6 +2087,13 @@ export class Editor {
             }
           : undefined,
     })
+    this.lastPresentCam = {
+      x: state.x,
+      y: state.y,
+      zoom: state.zoom,
+      vw: state.viewportWidth,
+      vh: state.viewportHeight,
+    }
     this.emitPhase('afterRender')
     this.events.emit('metrics', {
       frameMs: this.lastMetrics.frameMs,
@@ -1747,10 +2140,11 @@ export class Editor {
       // Raster pixels → physical size at rasterDpi (default 96), then into world units.
       const worldW = rasterPixelsToWorld(asset.width, this.worldUnit as GeomUnit, this.rasterDpi)
       const worldH = rasterPixelsToWorld(asset.height, this.worldUnit as GeomUnit, this.rasterDpi)
+      const imageLayer = this.ensureImageLayer()
       const entity: ImageEntity = {
         id: createEntityId('image'),
         type: 'image',
-        layerId: this.document.getDefaultLayerId(),
+        layerId: imageLayer.id,
         style: {},
         transform: IDENTITY_TRANSFORM,
         version: 1,
@@ -1808,6 +2202,25 @@ export class Editor {
       this.events.emit('import:progress', { loaded, warnings })
       this.requestRender()
     }
+    this.events.emit('document:session', { state: 'active' })
+    this.fitView()
+  }
+
+  private async importGcode(source: string | File, opts?: { signal?: AbortSignal }): Promise<void> {
+    this.events.emit('document:session', { state: 'loading' })
+    const text = typeof source === 'string' ? source : await source.text()
+    const result = importGcode(text, {
+      signal: opts?.signal,
+      layerId: this.document.getDefaultLayerId(),
+      flipY: true,
+      optimize: true,
+    })
+    const change = this.document.addMany(result.entities)
+    this.scene.applyChange(change)
+    this.events.emit('import:progress', {
+      loaded: result.entities.length,
+      warnings: result.warnings.length,
+    })
     this.events.emit('document:session', { state: 'active' })
     this.fitView()
   }

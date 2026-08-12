@@ -75,6 +75,16 @@ export interface PerformanceConfig {
   textBudget: number
   maxDirtyRects: number
   dirtyMergeAreaRatio: number
+  /**
+   * Hard cap on display-list items after density LOD.
+   * Excess drops smallest-on-screen first. 0 = unlimited.
+   */
+  maxVisible: number
+  /**
+   * Selection larger than this no longer bypasses density LOD
+   * (layer / group select-all must not force full render).
+   */
+  selectionLodExemptMax: number
 }
 
 export interface EditorConfig {
@@ -134,6 +144,8 @@ export const DEFAULT_PERFORMANCE_CONFIG: PerformanceConfig = {
   textBudget: 2000,
   maxDirtyRects: 8,
   dirtyMergeAreaRatio: 0.6,
+  maxVisible: 80_000,
+  selectionLodExemptMax: 64,
 }
 
 export const DEFAULT_EDITOR_CONFIG: EditorConfig = {

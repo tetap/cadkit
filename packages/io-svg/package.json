@@ -21,6 +21,7 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
+    "@cadkit/document": "workspace:*",
     "@cadkit/types": "workspace:*",
     "@cadkit/geometry": "workspace:*",
     "svg-pathdata": "^9.0.0"

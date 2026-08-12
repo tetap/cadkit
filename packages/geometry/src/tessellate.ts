@@ -40,8 +40,8 @@ export function tessellateCubicBezier(
 ): Vec2[] {
   const tol = Math.max(1e-9, pixelError * worldPerPixel)
   const out: Vec2[] = [p0]
+  // subdivideCubic always appends the segment end (p3); do not push it again.
   subdivideCubic(p0, p1, p2, p3, tol, out, 0)
-  out.push(p3)
   return out
 }
 
@@ -108,9 +108,10 @@ function subdivideCubic(
   const m012 = mid(m01, m12)
   const m123 = mid(m12, m23)
   const m0123 = mid(m012, m123)
+  // Left half ends by appending m0123; right half continues from there and
+  // only appends further samples / p3 (no pop — that used to drop every join
+  // and collapse curved pens to straight chords).
   subdivideCubic(p0, m01, m012, m0123, tol, out, depth + 1)
-  // remove duplicate mid point then continue
-  out.pop()
   subdivideCubic(m0123, m123, m23, p3, tol, out, depth + 1)
 }
 

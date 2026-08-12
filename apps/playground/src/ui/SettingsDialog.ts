@@ -104,6 +104,8 @@ export function openSettingsDialog(editor: Editor, store: AppStore, onDone?: () 
       )
       .join('')
 
+    const ix = editor.getInteraction()
+
     body.innerHTML = `
       <div class="${sectionCard}">
         <h3 class="${sectionTitle}">${t('settingsLanguage')}</h3>
@@ -141,9 +143,24 @@ export function openSettingsDialog(editor: Editor, store: AppStore, onDone?: () 
           <input type="checkbox" id="set-grid" ${s.gridVisible ? 'checked' : ''} />
           ${t('grid')}
         </label>
-        <label class="flex items-center gap-2 text-xs text-ink">
+        <label class="mb-3 flex items-center gap-2 text-xs text-ink">
           <input type="checkbox" id="set-rulers" ${s.rulersVisible ? 'checked' : ''} />
           ${t('rulers')}
+        </label>
+        <p class="${hint} mb-2">${t('snapHint')}</p>
+        <label class="mb-2 flex items-center gap-2 text-xs text-ink">
+          <input type="checkbox" id="set-align-snap" ${ix.alignEnabled ? 'checked' : ''} />
+          ${t('alignSnap')}
+        </label>
+        <label class="mb-2 flex items-center gap-2 text-xs text-ink">
+          <input type="checkbox" id="set-grid-snap" ${ix.snapEnabled ? 'checked' : ''} />
+          ${t('gridSnap')}
+          <span class="text-muted">(${ix.gridSize})</span>
+        </label>
+        <label class="flex items-center gap-2 text-xs text-ink">
+          <input type="checkbox" id="set-angle-snap" ${ix.angleStepDeg > 0 ? 'checked' : ''} />
+          ${t('angleSnap')}
+          <span class="text-muted">(15°)</span>
         </label>
       </div>
 
@@ -204,6 +221,16 @@ export function openSettingsDialog(editor: Editor, store: AppStore, onDone?: () 
       const next = (ev.target as HTMLInputElement).checked
       editor.setRulersVisible(next)
       store.set({ rulersVisible: next })
+    })
+    body.querySelector('#set-align-snap')?.addEventListener('change', (ev) => {
+      editor.setInteraction({ alignEnabled: (ev.target as HTMLInputElement).checked })
+    })
+    body.querySelector('#set-grid-snap')?.addEventListener('change', (ev) => {
+      editor.setInteraction({ snapEnabled: (ev.target as HTMLInputElement).checked })
+    })
+    body.querySelector('#set-angle-snap')?.addEventListener('change', (ev) => {
+      const on = (ev.target as HTMLInputElement).checked
+      editor.setInteraction({ angleStepDeg: on ? 15 : 0 })
     })
 
     const applyDpi = () => {

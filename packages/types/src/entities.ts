@@ -45,6 +45,18 @@ export interface LineEntity extends EntityBase {
   end: Vec2
 }
 
+/** Procedural closed shapes created by rect / heart / star tools. */
+export interface PolylineShapeMeta {
+  kind: 'rect' | 'heart' | 'star'
+  /** Star tip count (default 5). Ignored for rect/heart. */
+  points?: number
+  /**
+   * Corner / tip fillet radius in world units.
+   * Rect: uniform or [TL, TR, BR, BL]; star/heart: scalar fillet.
+   */
+  cornerRadii?: number | readonly [number, number, number, number]
+}
+
 export interface PolylineEntity extends EntityBase {
   type: 'polyline'
   points: Vec2[]
@@ -54,6 +66,8 @@ export interface PolylineEntity extends EntityBase {
    * Present after offset / boolean when outer + holes stay as one entity.
    */
   holes?: Vec2[][]
+  /** Authoritative procedural params; `points` is the tessellated cache. */
+  shape?: PolylineShapeMeta
 }
 
 export interface ArcEntity extends EntityBase {

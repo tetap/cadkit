@@ -1,9 +1,13 @@
 import type { Editor, Layer } from '@cadkit/editor'
+import { layerAcceptsEntity } from '@cadkit/editor'
 import type { Entity, EntityId, LayerId, TextEntity } from '@cadkit/types'
 import type { AppStore } from '../app/store.js'
 import { refreshHotFromSelection } from '../bindEditorEvents.js'
 import { t, type MessageKey } from '../i18n/index.js'
+import type { createEntityContextMenu } from './EntityContextMenu.js'
 import { btnGhost, fieldControl } from './tokens.js'
+
+type EntityContextMenu = ReturnType<typeof createEntityContextMenu>
 
 const MIME_LAYER = 'application/x-cadkit-layer'
 const MIME_ENTITIES = 'application/x-cadkit-entities'
@@ -37,18 +41,20 @@ function entityLabel(e: Entity): string {
     const flat = te.content.replace(/\s+/gu, ' ').trim()
     if (flat) return flat.length > 18 ? `${flat.slice(0, 17)}…` : flat
   }
+  if (e.type === 'polyline' && e.shape?.kind === 'heart') return t('toolHeart')
+  if (e.type === 'polyline' && e.shape?.kind === 'star') return t('toolStar')
+  if (e.type === 'polyline' && e.shape?.kind === 'rect') return t('toolRect')
   const key = TYPE_LABEL[e.type]
   return key ? t(key) : e.type
 }
 
 function entitiesByLayer(editor: Editor): Map<LayerId, Entity[]> {
   const map = new Map<LayerId, Entity[]>()
-  for (const layer of editor.getLayers()) map.set(layer.id, [])
-  for (const e of editor.document.getEntities()) {
-    // Nested group children still appear under their own layerId.
-    const list = map.get(e.layerId)
-    if (list) list.push(e)
-    else map.set(e.layerId, [e])
+  for (const layer of editor.getLayers()) {
+    const ordered = editor.getEntityOrder(layer.id)
+      .map((id) => editor.document.getEntity(id))
+      .filter((e): e is Entity => !!e)
+    map.set(layer.id, ordered)
   }
   return map
 }
@@ -60,7 +66,12 @@ function clearDropHints(root: HTMLElement): void {
 }
 
 /** Full-height left floating dock: layers + canvas entities, synced with selection. */
-export function mountLayersPanel(el: HTMLElement, editor: Editor, store: AppStore): () => void {
+export function mountLayersPanel(
+  el: HTMLElement,
+  editor: Editor,
+  store: AppStore,
+  entityMenu?: EntityContextMenu,
+): () => void {
   const render = () => {
     const { layersOpen, selectionIds } = store.get()
     if (!layersOpen) {
@@ -136,7 +147,7 @@ export function mountLayersPanel(el: HTMLElement, editor: Editor, store: AppStor
     })
 
     bindLayerRows(el, editor, store, byLayer)
-    bindEntityRows(el, editor, store)
+    bindEntityRows(el, editor, store, entityMenu)
   }
 
   return store.subscribeKeys(
@@ -269,8 +280,14 @@ function bindLayerRows(
           return
         }
         if (!ids.length) return
-        editor.moveEntitiesToLayer(ids, id)
-        editor.setActiveLayer(id)
+        const movable = filterEntitiesForLayer(editor, ids, id)
+        if (!movable.length) return
+        editor.moveEntitiesToLayer(movable, id)
+        // Don't activate image layers for vector tools.
+        const target = editor.document.getLayer(id)
+        if (target && layerAcceptsEntity(target, { type: 'line' })) {
+          editor.setActiveLayer(id)
+        }
         refreshHotFromSelection(editor, store)
         store.set({
           inspectedLayerId: id,
@@ -283,9 +300,28 @@ function bindLayerRows(
   })
 }
 
-function bindEntityRows(el: HTMLElement, editor: Editor, store: AppStore): void {
+function filterEntitiesForLayer(
+  editor: Editor,
+  ids: readonly EntityId[],
+  layerId: LayerId,
+): EntityId[] {
+  const layer = editor.document.getLayer(layerId)
+  if (!layer) return []
+  return ids.filter((eid) => {
+    const e = editor.document.getEntity(eid)
+    return !!e && layerAcceptsEntity(layer, e)
+  })
+}
+
+function bindEntityRows(
+  el: HTMLElement,
+  editor: Editor,
+  store: AppStore,
+  entityMenu?: EntityContextMenu,
+): void {
   el.querySelectorAll<HTMLElement>('[data-entity-id]').forEach((row) => {
     const id = row.dataset.entityId as EntityId
+    const layerId = row.dataset.entityLayer as LayerId | undefined
     row.addEventListener('click', (ev) => {
       ev.stopPropagation()
       if (ev.shiftKey || ev.metaKey || ev.ctrlKey) {
@@ -295,6 +331,17 @@ function bindEntityRows(el: HTMLElement, editor: Editor, store: AppStore): void 
         editor.select([...next])
       } else {
         editor.select([id])
+      }
+    })
+    row.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault()
+      ev.stopPropagation()
+      if (!entityMenu) return
+      const selected = store.get().selectionIds
+      if (selected.includes(id) && selected.length > 0) {
+        entityMenu.openAt(ev.clientX, ev.clientY, selected)
+      } else {
+        entityMenu.openAt(ev.clientX, ev.clientY, [id])
       }
     })
     row.addEventListener('dragstart', (ev) => {
@@ -308,6 +355,73 @@ function bindEntityRows(el: HTMLElement, editor: Editor, store: AppStore): void 
     row.addEventListener('dragend', () => {
       row.classList.remove('opacity-50')
       clearDropHints(el)
+    })
+
+    // Same-layer drop → reorder (panel top = front).
+    row.addEventListener('dragover', (ev) => {
+      const types = ev.dataTransfer?.types
+      if (!types || ![...types].includes(MIME_ENTITIES) || !layerId) return
+      ev.preventDefault()
+      ev.dataTransfer!.dropEffect = 'move'
+      clearDropHints(el)
+      const rect = row.getBoundingClientRect()
+      const before = ev.clientY < rect.top + rect.height / 2
+      row.classList.add(before ? 'ly-drop-before' : 'ly-drop-after')
+    })
+    row.addEventListener('dragleave', (ev) => {
+      const related = ev.relatedTarget as Node | null
+      if (related && row.contains(related)) return
+      row.classList.remove('ly-drop-before', 'ly-drop-after', 'ly-drop-over')
+    })
+    row.addEventListener('drop', (ev) => {
+      ev.preventDefault()
+      ev.stopPropagation()
+      clearDropHints(el)
+      if (!layerId) return
+      const entityRaw = ev.dataTransfer?.getData(MIME_ENTITIES)
+      if (!entityRaw) return
+      let ids: EntityId[] = []
+      try {
+        ids = JSON.parse(entityRaw) as EntityId[]
+      } catch {
+        return
+      }
+      if (!ids.length) return
+
+      const sameLayer = ids.every((eid) => editor.document.getEntity(eid)?.layerId === layerId)
+      if (!sameLayer) {
+        const movable = filterEntitiesForLayer(editor, ids, layerId)
+        if (!movable.length) return
+        editor.moveEntitiesToLayer(movable, layerId)
+        const target = editor.document.getLayer(layerId)
+        if (target && layerAcceptsEntity(target, { type: 'line' })) {
+          editor.setActiveLayer(layerId)
+        }
+        refreshHotFromSelection(editor, store)
+        store.set({
+          inspectedLayerId: layerId,
+          layerEpoch: store.get().layerEpoch + 1,
+        })
+        return
+      }
+
+      const order = editor.getEntityOrder(layerId)
+      const moving = new Set(ids.filter((eid) => order.includes(eid)))
+      if (!moving.size) return
+      const rect = row.getBoundingClientRect()
+      const before = ev.clientY < rect.top + rect.height / 2
+      const block = order.filter((eid) => moving.has(eid))
+      const rest = order.filter((eid) => !moving.has(eid))
+      let insertAt = rest.indexOf(id)
+      if (insertAt < 0) insertAt = rest.length
+      if (!before) insertAt += 1
+      const next = [...rest.slice(0, insertAt), ...block, ...rest.slice(insertAt)]
+      editor.reorderEntitiesInLayer(layerId, next)
+      store.set({
+        layerEpoch: store.get().layerEpoch + 1,
+        canUndo: editor.canUndo(),
+        canRedo: editor.canRedo(),
+      })
     })
   })
 }
@@ -380,12 +494,13 @@ function entityRow(e: Entity, isSelected: boolean): string {
         type="button"
         draggable="true"
         data-entity-id="${e.id}"
+        data-entity-layer="${e.layerId}"
         class="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] transition ${
           isSelected
             ? 'bg-brand/15 font-medium text-brand-dark'
             : 'text-ink hover:bg-soft'
         }"
-        title="${t('layerDropHint')}"
+        title="${t('entityReorder')}"
       >
         <span class="h-2.5 w-2.5 shrink-0 rounded-sm border border-black/10" style="background:${escapeAttr(toColorInput(swatch))}"></span>
         <span class="min-w-0 flex-1 truncate">${escapeAttr(entityLabel(e))}</span>

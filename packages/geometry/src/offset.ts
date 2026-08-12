@@ -77,14 +77,38 @@ function sampleEllipse(
   rotation: number,
   segments: number,
 ): Vec2[] {
+  return sampleEllipseSweep(cx, cy, rx, ry, rotation, 0, Math.PI * 2, segments, true)
+}
+
+function sampleEllipseSweep(
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  rotation: number,
+  start: number,
+  sweep: number,
+  segments: number,
+  closed: boolean,
+): Vec2[] {
   const cos = Math.cos(rotation)
   const sin = Math.sin(rotation)
   const pts: Vec2[] = []
-  for (let i = 0; i < segments; i++) {
-    const a = (i / segments) * Math.PI * 2
+  const n = Math.max(2, segments)
+  const count = closed ? n : n
+  for (let i = 0; i < count; i++) {
+    const a = start + (sweep * i) / (closed ? n : Math.max(n - 1, 1))
     const lx = rx * Math.cos(a)
     const ly = ry * Math.sin(a)
     pts.push({ x: cx + lx * cos - ly * sin, y: cy + lx * sin + ly * cos })
+  }
+  if (!closed) {
+    const a = start + sweep
+    const lx = rx * Math.cos(a)
+    const ly = ry * Math.sin(a)
+    const last = { x: cx + lx * cos - ly * sin, y: cy + lx * sin + ly * cos }
+    const prev = pts[pts.length - 1]
+    if (!prev || Math.hypot(last.x - prev.x, last.y - prev.y) > 1e-9) pts.push(last)
   }
   return pts
 }
@@ -160,17 +184,29 @@ export function entityToOffsetContours(
       return [{ closed: true, points: transformContour(local, m) }]
     }
     case 'ellipse': {
+      let sweep = entity.endAngle - entity.startAngle
+      while (sweep <= 0) sweep += Math.PI * 2
+      while (sweep > Math.PI * 2) sweep -= Math.PI * 2
+      const full = sweep >= Math.PI * 2 - 1e-3
       const avg = (entity.radiusX + entity.radiusY) / 2
-      const segs = Math.max(16, Math.ceil((Math.PI * 2 * avg) / Math.max(tol, 1e-6)))
-      const local = sampleEllipse(
+      const segs = Math.max(
+        16,
+        Math.ceil(((full ? Math.PI * 2 : sweep) * avg) / Math.max(tol, 1e-6)),
+      )
+      const local = sampleEllipseSweep(
         entity.center.x,
         entity.center.y,
         entity.radiusX,
         entity.radiusY,
         entity.rotation,
+        entity.startAngle,
+        sweep,
         segs,
+        full,
       )
-      return [{ closed: true, points: transformContour(local, m) }]
+      const pts = dedupeClose(transformContour(local, m))
+      if (pts.length < 2) return []
+      return [{ closed: full, points: pts }]
     }
     case 'arc': {
       const local = tessellateArc(
@@ -183,6 +219,7 @@ export function entityToOffsetContours(
       )
       const pts = dedupeClose(transformContour(local, m))
       if (pts.length < 2) return []
+      // Open rim for line mode; fill mode closes through center in gcode/svg exporters.
       return [{ closed: false, points: pts }]
     }
     case 'text': {
@@ -201,9 +238,49 @@ export function entityToOffsetContours(
       const rect = boundsRect(entity, m)
       return rect ? [rect] : []
     }
+    case 'group': {
+      // Flatten nested groups → leaf contours (world space via parent chain).
+      const out: OffsetContour[] = []
+      for (const id of entity.children) {
+        const child = lookup(id)
+        if (!child) continue
+        out.push(...entityToOffsetContours(child, lookup, opts))
+      }
+      return out
+    }
     default:
       return []
   }
+}
+
+/**
+ * Expand groups (and nested groups) into leaf entities that can be offset.
+ * Dedupes by id when both a group and a child appear in the selection.
+ */
+export function collectOffsetSourceEntities(
+  entities: readonly Entity[],
+  lookup: EntityLookup,
+): Entity[] {
+  const out: Entity[] = []
+  const seen = new Set<string>()
+  const visit = (e: Entity) => {
+    if (seen.has(e.id)) return
+    if (e.type === 'group') {
+      seen.add(e.id)
+      for (const id of e.children) {
+        const child = lookup(id)
+        if (child) visit(child)
+      }
+      return
+    }
+    // Skip non-geometry containers / rasters (image uses bounds fallback only when
+    // called via entityToOffsetContours directly — keep prior multi-select behavior).
+    if (e.type === 'dimension' || e.type === 'blockInstance') return
+    seen.add(e.id)
+    out.push(e)
+  }
+  for (const e of entities) visit(e)
+  return out
 }
 
 function filterOuterOnly(paths: PathsD): PathsD {
@@ -373,8 +450,10 @@ export function offsetEntity(
 }
 
 /**
- * Offset many entities. Closed subjects are unioned before offset, and closed
- * offset results are unioned again so overlapping loops collapse to one outline.
+ * Offset many entities.
+ * - Non-text closed shapes: union before/after so overlapping loops collapse.
+ * - Text: each glyph ring offsets independently (no pre-union), so letters stay
+ *   separate instead of melting into one cloud blob.
  */
 export function offsetEntities(
   entities: readonly Entity[],
@@ -382,10 +461,41 @@ export function offsetEntities(
   lookup: EntityLookup,
 ): OffsetContour[] {
   const precision = options.precision ?? 4
+  const textOut: OffsetContour[] = []
   const closedSources: OffsetContour[] = []
   const openSources: OffsetContour[] = []
-  for (const e of entities) {
-    for (const c of entityToOffsetContours(e, lookup, { arcTolerance: options.arcTolerance })) {
+  // Groups contribute their children (keeps text glyph offset path intact).
+  const sources = collectOffsetSourceEntities(entities, lookup)
+
+  for (const e of sources) {
+    const contours = entityToOffsetContours(e, lookup, { arcTolerance: options.arcTolerance })
+    if (e.type === 'text') {
+      for (const c of contours) {
+        const pts = dedupeClose(c.points)
+        if (!(c.closed && pts.length >= 3)) continue
+        // One glyph (or hole stack) at a time — inflatePathsD merges neighbors.
+        textOut.push(
+          ...offsetContours(
+            [
+              {
+                points: pts,
+                closed: true,
+                ...(c.holes?.length
+                  ? {
+                      holes: c.holes
+                        .map((h) => dedupeClose(h))
+                        .filter((h) => h.length >= 3),
+                    }
+                  : {}),
+              },
+            ],
+            options,
+          ),
+        )
+      }
+      continue
+    }
+    for (const c of contours) {
       const pts = dedupeClose(c.points)
       if (c.closed && pts.length >= 3) {
         closedSources.push({
@@ -405,20 +515,21 @@ export function offsetEntities(
     }
   }
 
-  // Union (PolyTree) first so nested selections become one outer+holes subject.
   const subjects =
     closedSources.length > 1 || closedSources.some((c) => c.holes?.length)
       ? unionClosedContours(closedSources, precision)
       : closedSources
 
-  let closedOut = offsetContours(subjects, options)
+  let shapeOut = offsetContours(subjects, options)
   const openOut = offsetContours(openSources, options)
 
-  // Final union keeps multiple outers separate but each retains its holes.
-  if (closedOut.length > 1 || closedOut.some((c) => c.holes?.length)) {
-    closedOut = unionClosedContours(closedOut, precision)
+  if (shapeOut.length > 1 || shapeOut.some((c) => c.holes?.length)) {
+    shapeOut = unionClosedContours(shapeOut, precision)
   }
+
+  let closedOut = [...textOut, ...shapeOut]
   if (options.outerShapesOnly && closedOut.length > 0) {
+    if (closedOut.length > 1) closedOut = unionClosedContours(closedOut, precision)
     closedOut = closedOut.map((c) => ({ points: c.points, closed: true as const }))
   }
 

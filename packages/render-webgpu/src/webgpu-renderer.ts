@@ -5,13 +5,14 @@ import {
   type PickResult,
   type RenderFrameInput,
   type RendererBackend,
+  type TextureResolver,
 } from '@cadkit/render-core'
 import type { RenderItem } from '@cadkit/scene'
-import type { TextureResolver } from '@cadkit/render-core'
-import { LINE_SHADER, PICK_SHADER } from './shaders.js'
+import { LINE_SHADER, PICK_SHADER, RECT_STROKE_INSTANCE_SHADER } from './shaders.js'
 import { ImagePass } from './image-pass.js'
-import { isPaintVisible, parseColor } from './color.js'
-import { packEntityFillVertices } from './fill-pack.js'
+import { parseColor } from './color.js'
+import { packDrawOrder, type DrawOp } from './draw-order.js'
+import { cssRectToScissor, panStripRects } from './incremental.js'
 
 const PAGE_FLOATS = 256 * 1024 // ~1MB of floats per page
 
@@ -35,6 +36,8 @@ function parseClear(hex: string): [number, number, number] {
   return [c[0], c[1], c[2]]
 }
 
+type GpuRedraw = NonNullable<FrameMetrics['gpuRedraw']>
+
 export class WebGPURenderer implements RendererBackend {
   readonly kind: RendererKind = 'webgpu'
   private canvas: HTMLCanvasElement | null = null
@@ -43,7 +46,12 @@ export class WebGPURenderer implements RendererBackend {
   private format: GPUTextureFormat = 'bgra8unorm'
   private pipeline: GPURenderPipeline | null = null
   private fillPipeline: GPURenderPipeline | null = null
+  private rectInstancePipeline: GPURenderPipeline | null = null
   private pickPipeline: GPURenderPipeline | null = null
+  private rectInstanceBindGroup: GPUBindGroup | null = null
+  private instanceBuffer: GPUBuffer | null = null
+  private instanceCapacity = 0
+  private lastInstanceCount = 0
   private uniformBuffer: GPUBuffer | null = null
   /** Separate uniforms for screen-space overlays (grid); must not share entity camera matrix. */
   private overlayUniformBuffer: GPUBuffer | null = null
@@ -75,8 +83,16 @@ export class WebGPURenderer implements RendererBackend {
   private lastGridVertexCount = 0
   private lastFillVertexCount = 0
   private lastEntityFillVertexCount = 0
+  private lastDrawOps: DrawOp[] = []
   private readonly imagePass = new ImagePass()
   private textureResolver: TextureResolver | null = null
+  /** Ping-pong persistent scene color targets (device pixels). */
+  private sceneTextures: [GPUTexture | null, GPUTexture | null] = [null, null]
+  private sceneIndex = 0
+  private sceneValid = false
+  private clearQuadBuffer: GPUBuffer | null = null
+  private clearQuadCapacity = 0
+  private lastClearColorKey = ''
 
   static async isSupported(): Promise<boolean> {
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) return false
@@ -104,6 +120,7 @@ export class WebGPURenderer implements RendererBackend {
       device: this.device,
       format: this.format,
       alphaMode: 'opaque',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
     })
 
     const module = this.device.createShaderModule({ code: LINE_SHADER })
@@ -186,6 +203,36 @@ export class WebGPURenderer implements RendererBackend {
       layout: this.fillPipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
     })
+
+    const rectModule = this.device.createShaderModule({ code: RECT_STROKE_INSTANCE_SHADER })
+    this.rectInstancePipeline = this.device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: rectModule,
+        entryPoint: 'vsMain',
+        buffers: [
+          {
+            arrayStride: 32,
+            stepMode: 'instance',
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x4' },
+              { shaderLocation: 1, offset: 16, format: 'float32x4' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: rectModule,
+        entryPoint: 'fsMain',
+        targets: [{ format: this.format }],
+      },
+      primitive: { topology: 'line-list' },
+    })
+    this.rectInstanceBindGroup = this.device.createBindGroup({
+      layout: this.rectInstancePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
+    })
+
     await this.imagePass.initialize(this.device, this.format)
   }
 
@@ -206,6 +253,7 @@ export class WebGPURenderer implements RendererBackend {
       device: this.device,
       format: this.format,
       alphaMode: 'opaque',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
     })
     this.pickTexture?.destroy()
     this.pickTexture = this.device.createTexture({
@@ -218,6 +266,7 @@ export class WebGPURenderer implements RendererBackend {
       size: 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     })
+    this.destroySceneTextures()
   }
 
   setMemoryBudget(budgetMB: number): void {
@@ -246,6 +295,35 @@ export class WebGPURenderer implements RendererBackend {
     }
     if (this.gpuLost) return { ...this.emptyMetrics(0), gpuLost: true }
 
+    const bufW = this.canvas?.width ?? 1
+    const bufH = this.canvas?.height ?? 1
+    this.ensureSceneTextures(bufW, bufH)
+
+    const panDxCss = input.panPixelDelta?.dx ?? 0
+    const panDyCss = input.panPixelDelta?.dy ?? 0
+    const panDx = Math.round(panDxCss * this.dpr)
+    const panDy = Math.round(panDyCss * this.dpr)
+    const panOk =
+      this.sceneValid &&
+      (panDx !== 0 || panDy !== 0) &&
+      Math.abs(panDx) < bufW &&
+      Math.abs(panDy) < bufH
+
+    let gpuRedraw: GpuRedraw = 'full'
+    if (input.dirtyFullscreen === false && this.sceneValid) {
+      const hasDirty = !!(input.dirtyScreenRects && input.dirtyScreenRects.length > 0)
+      const wantsPan =
+        !!input.panPixelDelta &&
+        (input.panPixelDelta.dx !== 0 || input.panPixelDelta.dy !== 0)
+      if (wantsPan && !hasDirty) {
+        gpuRedraw = panOk ? 'pan-blit' : 'full'
+      } else if (hasDirty) {
+        gpuRedraw = 'dirty'
+      } else {
+        gpuRedraw = 'present'
+      }
+    }
+
     this.lastItems = input.items
     const tPack0 = performance.now()
     let vertexData: Float32Array
@@ -253,144 +331,243 @@ export class WebGPURenderer implements RendererBackend {
     let geometryUploadBytes = 0
     let entityFillData: Float32Array = new Float32Array(0)
     let entityFillCount = 0
-    let entityFillBytes = 0
-    if (input.skipGeometryUpload && this.lastVertexCount > 0 && this.vertexBuffer) {
+    let instanceData: Float32Array = new Float32Array(0)
+    let instanceCount = 0
+    let drawOps: DrawOp[] = this.lastDrawOps
+    const skipAllGpuWork = gpuRedraw === 'present'
+    const canSkipGeom =
+      !skipAllGpuWork &&
+      input.skipGeometryUpload &&
+      this.lastDrawOps.length > 0 &&
+      (this.vertexBuffer != null ||
+        this.entityFillVertexBuffer != null ||
+        this.instanceBuffer != null)
+    if (skipAllGpuWork) {
+      vertexCount = this.lastVertexCount
+      vertexData = this.packScratch.subarray(0, 0)
+      entityFillCount = this.lastEntityFillVertexCount
+      instanceCount = this.lastInstanceCount
+    } else if (canSkipGeom) {
       vertexCount = this.lastVertexCount
       vertexData = this.packScratch.subarray(0, 0)
       geometryUploadBytes = 0
       entityFillCount = this.lastEntityFillVertexCount
+      instanceCount = this.lastInstanceCount
     } else {
-      const packed = this.packVertices(input.items)
-      vertexData = packed.vertexData
-      vertexCount = packed.vertexCount
+      const packed = packDrawOrder(input.items, this.packScratch)
+      this.packScratch = packed.strokeScratch
+      vertexData = packed.strokeData
+      vertexCount = packed.strokeVertexCount
+      entityFillData = packed.fillData
+      entityFillCount = packed.fillVertexCount
+      instanceData = packed.instanceData
+      instanceCount = packed.instanceCount
       geometryUploadBytes = packed.uploadBytes
+      drawOps = packed.ops
       this.lastVertexCount = vertexCount
       this.lastGeometryUploadBytes = geometryUploadBytes
-      const fills = packEntityFillVertices(input.items)
-      entityFillData = fills.vertexData
-      entityFillCount = fills.vertexCount
-      entityFillBytes = fills.uploadBytes
       this.lastEntityFillVertexCount = entityFillCount
+      this.lastInstanceCount = instanceCount
+      this.lastDrawOps = drawOps
     }
     const packMs = performance.now() - tPack0
 
     const grid = input.grid
-    const gridBytes = !input.skipGridUpload && grid ? grid.vertices.byteLength : 0
-    const fillBytes = !input.skipGridUpload && grid?.fillVertices ? grid.fillVertices.byteLength : 0
-    this.uploadBytes = geometryUploadBytes + gridBytes + fillBytes + entityFillBytes
+    const gridBytes = !skipAllGpuWork && !input.skipGridUpload && grid ? grid.vertices.byteLength : 0
+    const fillBytes =
+      !skipAllGpuWork && !input.skipGridUpload && grid?.fillVertices
+        ? grid.fillVertices.byteLength
+        : 0
+    this.uploadBytes = geometryUploadBytes + gridBytes + fillBytes
 
     const tUpload0 = performance.now()
-    // Separate vertex + uniform buffers: queue.writeBuffer runs before the submitted
-    // command buffer, so sharing one buffer would let the last upload win for every draw.
-    const needOverlayUniforms =
-      (grid && grid.vertexCount > 0) || (grid && (grid.fillVertexCount ?? 0) > 0)
-    if (needOverlayUniforms) {
-      this.writeUniforms(this.overlayUniformBuffer, IDENTITY_VIEW)
-    }
-    if (!input.skipGridUpload && grid && (grid.fillVertexCount ?? 0) > 0 && grid.fillVertices) {
-      this.ensureFillVertexBuffer(Math.max(fillBytes, 24))
-      this.device.queue.writeBuffer(this.fillVertexBuffer!, 0, toBufferSource(grid.fillVertices))
-      this.lastFillVertexCount = grid.fillVertexCount ?? 0
-    }
-    if (!input.skipGridUpload && grid && grid.vertexCount > 0) {
-      this.ensureOverlayVertexBuffer(Math.max(gridBytes, 24))
-      this.device.queue.writeBuffer(this.overlayVertexBuffer!, 0, toBufferSource(grid.vertices))
-      this.lastGridVertexCount = grid.vertexCount
-    }
     const drawGridCount = input.skipGridUpload ? this.lastGridVertexCount : (grid?.vertexCount ?? 0)
     const drawFillCount = input.skipGridUpload
       ? this.lastFillVertexCount
       : (grid?.fillVertexCount ?? 0)
-    // Camera uniform always updates (pan-only path).
-    if (vertexCount > 0 || entityFillCount > 0 || this.vertexBuffer || this.entityFillVertexBuffer) {
-      if (!input.skipGeometryUpload && vertexCount > 0) {
-        this.ensureVertexBuffer(Math.max(vertexData.byteLength, 24))
-        this.device.queue.writeBuffer(this.vertexBuffer!, 0, toBufferSource(vertexData))
+
+    if (!skipAllGpuWork) {
+      // Separate vertex + uniform buffers: queue.writeBuffer runs before the submitted
+      // command buffer, so sharing one buffer would let the last upload win for every draw.
+      const needOverlayUniforms = drawGridCount > 0 || drawFillCount > 0
+      if (needOverlayUniforms) {
+        this.writeUniforms(this.overlayUniformBuffer, IDENTITY_VIEW)
       }
-      if (!input.skipGeometryUpload && entityFillCount > 0) {
-        this.ensureEntityFillVertexBuffer(Math.max(entityFillData.byteLength, 24))
-        this.device.queue.writeBuffer(
-          this.entityFillVertexBuffer!,
-          0,
-          toBufferSource(entityFillData),
-        )
+      if (!input.skipGridUpload && grid && (grid.fillVertexCount ?? 0) > 0 && grid.fillVertices) {
+        this.ensureFillVertexBuffer(Math.max(fillBytes, 24))
+        this.device.queue.writeBuffer(this.fillVertexBuffer!, 0, toBufferSource(grid.fillVertices))
+        this.lastFillVertexCount = grid.fillVertexCount ?? 0
       }
-      this.writeUniforms(this.uniformBuffer!, input.camera.getWorldToScreen())
+      if (!input.skipGridUpload && grid && grid.vertexCount > 0) {
+        this.ensureOverlayVertexBuffer(Math.max(gridBytes, 24))
+        this.device.queue.writeBuffer(this.overlayVertexBuffer!, 0, toBufferSource(grid.vertices))
+        this.lastGridVertexCount = grid.vertexCount
+      }
+      if (
+        vertexCount > 0 ||
+        entityFillCount > 0 ||
+        instanceCount > 0 ||
+        this.vertexBuffer ||
+        this.entityFillVertexBuffer ||
+        this.instanceBuffer
+      ) {
+        if (!input.skipGeometryUpload && vertexCount > 0) {
+          this.ensureVertexBuffer(Math.max(vertexData.byteLength, 24))
+          this.device.queue.writeBuffer(this.vertexBuffer!, 0, toBufferSource(vertexData))
+        }
+        if (!input.skipGeometryUpload && entityFillCount > 0) {
+          this.ensureEntityFillVertexBuffer(Math.max(entityFillData.byteLength, 24))
+          this.device.queue.writeBuffer(
+            this.entityFillVertexBuffer!,
+            0,
+            toBufferSource(entityFillData),
+          )
+        }
+        if (!input.skipGeometryUpload && instanceCount > 0) {
+          this.ensureInstanceBuffer(Math.max(instanceData.byteLength, 32))
+          this.device.queue.writeBuffer(this.instanceBuffer!, 0, toBufferSource(instanceData))
+        }
+        this.writeUniforms(this.uniformBuffer!, input.camera.getWorldToScreen())
+      }
     }
     const uploadMs = performance.now() - tUpload0
 
     const textures = input.textures ?? this.textureResolver ?? undefined
-    // Filter chains submit their own command buffers; must run before the scene pass.
-    this.imagePass.prepareFilters(input.items, textures)
+    if (!skipAllGpuWork) {
+      // Filter chains submit their own command buffers; must run before the scene pass.
+      this.imagePass.prepareFilters(input.items, textures)
+    }
 
     const clear = parseClear(input.clearColor ?? '#ffffff')
     const encoder = this.device.createCommandEncoder()
-    const view = this.context.getCurrentTexture().createView()
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view,
-          clearValue: { r: clear[0], g: clear[1], b: clear[2], a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-    })
-
     let drawCalls = 0
 
-    // Page fill under grid (screen-space)
-    if (drawFillCount > 0 && this.fillVertexBuffer) {
-      pass.setPipeline(this.fillPipeline)
-      pass.setBindGroup(0, this.fillBindGroup)
-      pass.setVertexBuffer(0, this.fillVertexBuffer)
-      pass.draw(drawFillCount)
-      drawCalls++
+    if (gpuRedraw === 'present') {
+      this.copySceneToSwapchain(encoder)
+    } else if (gpuRedraw === 'pan-blit') {
+      const src = this.sceneTextures[this.sceneIndex]!
+      const dstIndex = 1 - this.sceneIndex
+      const dst = this.sceneTextures[dstIndex]!
+      // Clear destination, copy shifted previous frame, redraw uncovered strips.
+      {
+        const clearPass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: dst.createView(),
+              clearValue: { r: clear[0], g: clear[1], b: clear[2], a: 1 },
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
+        })
+        clearPass.end()
+      }
+      const copyW = bufW - Math.abs(panDx)
+      const copyH = bufH - Math.abs(panDy)
+      if (copyW > 0 && copyH > 0) {
+        encoder.copyTextureToTexture(
+          {
+            texture: src,
+            origin: { x: Math.max(0, -panDx), y: Math.max(0, -panDy) },
+          },
+          {
+            texture: dst,
+            origin: { x: Math.max(0, panDx), y: Math.max(0, panDy) },
+          },
+          { width: copyW, height: copyH },
+        )
+      }
+      this.sceneIndex = dstIndex
+      const strips = panStripRects(this.width, this.height, panDxCss, panDyCss)
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: dst.createView(),
+            loadOp: 'load',
+            storeOp: 'store',
+          },
+        ],
+      })
+      for (const strip of strips) {
+        const sc = cssRectToScissor(strip, this.dpr, bufW, bufH)
+        if (!sc) continue
+        pass.setScissorRect(sc.x, sc.y, sc.w, sc.h)
+        drawCalls += this.drawSceneContents(
+          pass,
+          input,
+          drawOps,
+          drawFillCount,
+          drawGridCount,
+          textures,
+          clear,
+          true,
+        )
+      }
+      pass.end()
+      this.sceneValid = true
+      this.copySceneToSwapchain(encoder)
+    } else if (gpuRedraw === 'dirty') {
+      const target = this.sceneTextures[this.sceneIndex]!
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: target.createView(),
+            loadOp: 'load',
+            storeOp: 'store',
+          },
+        ],
+      })
+      for (const rect of input.dirtyScreenRects ?? []) {
+        const sc = cssRectToScissor(rect, this.dpr, bufW, bufH)
+        if (!sc) continue
+        pass.setScissorRect(sc.x, sc.y, sc.w, sc.h)
+        drawCalls += this.drawSceneContents(
+          pass,
+          input,
+          drawOps,
+          drawFillCount,
+          drawGridCount,
+          textures,
+          clear,
+          true,
+        )
+      }
+      pass.end()
+      this.sceneValid = true
+      this.copySceneToSwapchain(encoder)
+    } else {
+      const target = this.sceneTextures[this.sceneIndex]!
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: target.createView(),
+            clearValue: { r: clear[0], g: clear[1], b: clear[2], a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      })
+      drawCalls += this.drawSceneContents(
+        pass,
+        input,
+        drawOps,
+        drawFillCount,
+        drawGridCount,
+        textures,
+        clear,
+        false,
+      )
+      pass.end()
+      this.sceneValid = true
+      this.copySceneToSwapchain(encoder)
     }
 
-    if (drawGridCount > 0 && this.overlayVertexBuffer) {
-      pass.setPipeline(this.pipeline)
-      pass.setBindGroup(0, this.overlayBindGroup)
-      pass.setVertexBuffer(0, this.overlayVertexBuffer)
-      pass.draw(drawGridCount)
-      drawCalls++
-    }
-
-    // Entity fills (world-space) under strokes
-    if (entityFillCount > 0 && this.entityFillVertexBuffer && this.entityFillBindGroup) {
-      pass.setPipeline(this.fillPipeline)
-      pass.setBindGroup(0, this.entityFillBindGroup)
-      pass.setVertexBuffer(0, this.entityFillVertexBuffer)
-      pass.draw(entityFillCount)
-      drawCalls++
-    }
-
-    if (vertexCount > 0 && this.vertexBuffer) {
-      pass.setPipeline(this.pipeline)
-      pass.setBindGroup(0, this.bindGroup)
-      pass.setVertexBuffer(0, this.vertexBuffer)
-      pass.draw(vertexCount)
-      drawCalls++
-    }
-
-    drawCalls += this.imagePass.draw(
-      pass,
-      input.items,
-      input.camera.getWorldToScreen(),
-      { w: this.width, h: this.height },
-      textures,
-    )
-
-    pass.end()
     const tSubmit0 = performance.now()
     this.device.queue.submit([encoder.finish()])
     const submitMs = performance.now() - tSubmit0
     this.budget.track(
       'vertices',
-      (this.lastGeometryUploadBytes || vertexData.byteLength) +
-        gridBytes +
-        fillBytes +
-        entityFillBytes,
+      (this.lastGeometryUploadBytes || vertexData.byteLength) + gridBytes + fillBytes,
     )
 
     return {
@@ -407,7 +584,168 @@ export class WebGPURenderer implements RendererBackend {
       submitMs,
       sceneBuildMs: input.stats?.buildMs,
       mode: input.mode,
+      gpuRedraw,
     }
+  }
+
+  private drawSceneContents(
+    pass: GPURenderPassEncoder,
+    input: RenderFrameInput,
+    drawOps: DrawOp[],
+    drawFillCount: number,
+    drawGridCount: number,
+    textures: TextureResolver | undefined,
+    clear: [number, number, number],
+    clearScissorFirst: boolean,
+  ): number {
+    let drawCalls = 0
+    if (clearScissorFirst) {
+      drawCalls += this.drawClearQuad(pass, clear)
+    }
+
+    // Page fill under grid (screen-space)
+    if (drawFillCount > 0 && this.fillVertexBuffer) {
+      pass.setPipeline(this.fillPipeline!)
+      pass.setBindGroup(0, this.fillBindGroup!)
+      pass.setVertexBuffer(0, this.fillVertexBuffer)
+      pass.draw(drawFillCount)
+      drawCalls++
+    }
+
+    if (drawGridCount > 0 && this.overlayVertexBuffer) {
+      pass.setPipeline(this.pipeline!)
+      pass.setBindGroup(0, this.overlayBindGroup!)
+      pass.setVertexBuffer(0, this.overlayVertexBuffer)
+      pass.draw(drawGridCount)
+      drawCalls++
+    }
+
+    // Entities: interleaved fill / stroke / image in zOrder (layer stack).
+    const camMatrix = input.camera.getWorldToScreen()
+    const viewport = { w: this.width, h: this.height }
+    for (const op of drawOps) {
+      if (op.kind === 'fill') {
+        if (
+          op.vertexCount <= 0 ||
+          !this.entityFillVertexBuffer ||
+          !this.entityFillBindGroup ||
+          !this.fillPipeline
+        ) {
+          continue
+        }
+        pass.setPipeline(this.fillPipeline)
+        pass.setBindGroup(0, this.entityFillBindGroup)
+        pass.setVertexBuffer(0, this.entityFillVertexBuffer)
+        pass.draw(op.vertexCount, 1, op.firstVertex)
+        drawCalls++
+      } else if (op.kind === 'stroke') {
+        if (op.vertexCount <= 0 || !this.vertexBuffer || !this.bindGroup || !this.pipeline) continue
+        pass.setPipeline(this.pipeline)
+        pass.setBindGroup(0, this.bindGroup)
+        pass.setVertexBuffer(0, this.vertexBuffer)
+        pass.draw(op.vertexCount, 1, op.firstVertex)
+        drawCalls++
+      } else if (op.kind === 'rectStroke') {
+        if (
+          op.instanceCount <= 0 ||
+          !this.instanceBuffer ||
+          !this.rectInstancePipeline ||
+          !this.rectInstanceBindGroup
+        ) {
+          continue
+        }
+        pass.setPipeline(this.rectInstancePipeline)
+        pass.setBindGroup(0, this.rectInstanceBindGroup)
+        pass.setVertexBuffer(0, this.instanceBuffer)
+        pass.draw(8, op.instanceCount, 0, op.firstInstance)
+        drawCalls++
+      } else {
+        const item = input.items[op.itemIndex]
+        if (!item) continue
+        drawCalls += this.imagePass.draw(pass, [item], camMatrix, viewport, textures)
+      }
+    }
+    return drawCalls
+  }
+
+  private drawClearQuad(pass: GPURenderPassEncoder, clear: [number, number, number]): number {
+    if (!this.device || !this.fillPipeline || !this.fillBindGroup) return 0
+    this.ensureClearQuad(clear)
+    if (!this.clearQuadBuffer) return 0
+    this.writeUniforms(this.overlayUniformBuffer!, IDENTITY_VIEW)
+    pass.setPipeline(this.fillPipeline)
+    pass.setBindGroup(0, this.fillBindGroup)
+    pass.setVertexBuffer(0, this.clearQuadBuffer)
+    pass.draw(6)
+    return 1
+  }
+
+  private ensureClearQuad(clear: [number, number, number]): void {
+    if (!this.device) return
+    const key = `${this.width}|${this.height}|${clear[0]}|${clear[1]}|${clear[2]}`
+    if (this.clearQuadBuffer && this.lastClearColorKey === key) return
+    const w = this.width
+    const h = this.height
+    const [r, g, b] = clear
+    const data = new Float32Array([
+      0, 0, r, g, b, 1,
+      w, 0, r, g, b, 1,
+      w, h, r, g, b, 1,
+      0, 0, r, g, b, 1,
+      w, h, r, g, b, 1,
+      0, h, r, g, b, 1,
+    ])
+    const bytes = data.byteLength
+    if (!this.clearQuadBuffer || this.clearQuadCapacity < bytes) {
+      this.clearQuadBuffer?.destroy()
+      this.clearQuadCapacity = bytes
+      this.clearQuadBuffer = this.device.createBuffer({
+        size: bytes,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      })
+    }
+    this.device.queue.writeBuffer(this.clearQuadBuffer, 0, toBufferSource(data))
+    this.lastClearColorKey = key
+  }
+
+  private ensureSceneTextures(bufW: number, bufH: number): void {
+    if (!this.device) return
+    const w = Math.max(1, bufW)
+    const h = Math.max(1, bufH)
+    for (let i = 0; i < 2; i++) {
+      const tex = this.sceneTextures[i]
+      if (tex && tex.width === w && tex.height === h) continue
+      tex?.destroy()
+      this.sceneTextures[i] = this.device.createTexture({
+        size: { width: w, height: h },
+        format: this.format,
+        usage:
+          GPUTextureUsage.RENDER_ATTACHMENT |
+          GPUTextureUsage.COPY_SRC |
+          GPUTextureUsage.COPY_DST,
+      })
+      this.sceneValid = false
+    }
+  }
+
+  private destroySceneTextures(): void {
+    for (let i = 0; i < 2; i++) {
+      this.sceneTextures[i]?.destroy()
+      this.sceneTextures[i] = null
+    }
+    this.sceneIndex = 0
+    this.sceneValid = false
+  }
+
+  private copySceneToSwapchain(encoder: GPUCommandEncoder): void {
+    if (!this.context || !this.canvas) return
+    const src = this.sceneTextures[this.sceneIndex]
+    if (!src) return
+    const dst = this.context.getCurrentTexture()
+    const w = Math.min(src.width, dst.width)
+    const h = Math.min(src.height, dst.height)
+    if (w <= 0 || h <= 0) return
+    encoder.copyTextureToTexture({ texture: src }, { texture: dst }, { width: w, height: h })
   }
 
   private writeUniforms(buffer: GPUBuffer, m: readonly number[]): void {
@@ -488,6 +826,10 @@ export class WebGPURenderer implements RendererBackend {
     this.overlayVertexBuffer?.destroy()
     this.fillVertexBuffer?.destroy()
     this.entityFillVertexBuffer?.destroy()
+    this.instanceBuffer?.destroy()
+    this.clearQuadBuffer?.destroy()
+    this.clearQuadBuffer = null
+    this.destroySceneTextures()
     this.uniformBuffer?.destroy()
     this.overlayUniformBuffer?.destroy()
     this.pickTexture?.destroy()
@@ -500,48 +842,15 @@ export class WebGPURenderer implements RendererBackend {
     this.overlayBindGroup = null
     this.fillBindGroup = null
     this.entityFillBindGroup = null
-  }
-
-  private packVertices(items: RenderItem[]): {
-    vertexData: Float32Array
-    vertexCount: number
-    uploadBytes: number
-  } {
-    // Each line segment → 2 vertices * (x,y,r,g,b,a)
-    let segments = 0
-    for (const item of items) {
-      if (item.kind === 'image' || item.kind === 'text') continue
-      if (item.kind === 'line') segments += 1
-      else if (item.coords.length >= 4) segments += item.coords.length / 2 - 1
-    }
-    const floats = Math.max(segments * 2 * 6, 6)
-    if (this.packScratch.length < floats) {
-      this.packScratch = new Float32Array(Math.max(floats, this.packScratch.length * 2))
-    }
-    const data = this.packScratch
-    let o = 0
-    for (const item of items) {
-      if (item.kind === 'image' || item.kind === 'text') continue
-      if (!isPaintVisible(item.stroke)) continue
-      const [r, g, b, a] = parseColor(item.stroke)
-      const c = item.coords
-      if (item.kind === 'line' && c.length >= 4) {
-        data[o++] = c[0]!; data[o++] = c[1]!; data[o++] = r; data[o++] = g; data[o++] = b; data[o++] = a
-        data[o++] = c[2]!; data[o++] = c[3]!; data[o++] = r; data[o++] = g; data[o++] = b; data[o++] = a
-        continue
-      }
-      for (let i = 0; i + 3 < c.length; i += 2) {
-        data[o++] = c[i]!; data[o++] = c[i + 1]!; data[o++] = r; data[o++] = g; data[o++] = b; data[o++] = a
-        data[o++] = c[i + 2]!; data[o++] = c[i + 3]!; data[o++] = r; data[o++] = g; data[o++] = b; data[o++] = a
-      }
-    }
-    return { vertexData: data.subarray(0, o), vertexCount: o / 6, uploadBytes: o * 4 }
+    this.rectInstanceBindGroup = null
   }
 
   private packPickVertices(items: RenderItem[]): { pickData: ArrayBuffer; vertexCount: number } {
     let segments = 0
     for (const item of items) {
-      if (item.kind === 'line') segments += 1
+      if (item.kind === 'image' || item.kind === 'text') continue
+      if (item.kind === 'instance' && item.coords.length >= 4) segments += 4
+      else if (item.kind === 'line') segments += 1
       else if (item.coords.length >= 4) segments += item.coords.length / 2 - 1
     }
     const buffer = new ArrayBuffer(Math.max(segments * 2 * 12, 12))
@@ -550,10 +859,22 @@ export class WebGPURenderer implements RendererBackend {
     let fi = 0
     let ui = 0
     for (const item of items) {
+      if (item.kind === 'image' || item.kind === 'text') continue
       const c = item.coords
       const write = (x0: number, y0: number, x1: number, y1: number) => {
         f32[fi++] = x0; f32[fi++] = y0; u32[ui + 2] = item.pickId; fi++; ui = fi
         f32[fi++] = x1; f32[fi++] = y1; u32[ui + 2] = item.pickId; fi++; ui = fi
+      }
+      if (item.kind === 'instance' && c.length >= 4) {
+        const x = c[0]!
+        const y = c[1]!
+        const w = c[2]!
+        const h = c[3]!
+        write(x, y, x + w, y)
+        write(x + w, y, x + w, y + h)
+        write(x + w, y + h, x, y + h)
+        write(x, y + h, x, y)
+        continue
       }
       if (item.kind === 'line' && c.length >= 4) write(c[0]!, c[1]!, c[2]!, c[3]!)
       else {
@@ -606,6 +927,18 @@ export class WebGPURenderer implements RendererBackend {
     this.entityFillVertexBuffer?.destroy()
     this.entityFillVertexCapacity = needed
     this.entityFillVertexBuffer = this.device.createBuffer({
+      size: needed,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+  }
+
+  private ensureInstanceBuffer(bytes: number): void {
+    if (!this.device) return
+    const needed = Math.max(bytes, 256)
+    if (this.instanceBuffer && this.instanceCapacity >= needed) return
+    this.instanceBuffer?.destroy()
+    this.instanceCapacity = needed
+    this.instanceBuffer = this.device.createBuffer({
       size: needed,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     })

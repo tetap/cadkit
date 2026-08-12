@@ -17,9 +17,13 @@ export {
 export {
   CadDocument,
   DEFAULT_LAYER_GCODE,
+  isImageLayer,
+  layerAcceptsEntity,
   layerFillFromStroke,
+  resolveLayerAwarePaint,
   resolveLayerGcode,
   type Layer,
+  type LayerAwarePaint,
   type LayerEngraveMode,
   type LayerFillStyle,
   type LayerGcodeParams,

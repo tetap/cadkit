@@ -7,6 +7,7 @@ import {
   HistoryStack,
   MutateEntitiesCommand,
   RemoveEntityCommand,
+  ReorderEntitiesCommand,
   UngroupCommand,
   UpdateEntityCommand,
 } from './history.js'
@@ -121,6 +122,23 @@ describe('HistoryStack', () => {
     expect(doc.count()).toBe(3)
     expect(doc.getEntity(a.id)?.parentId).toBe(group.id)
     expect(createEntityId).toBeTruthy()
+  })
+
+  it('undoes entity stack reorder', () => {
+    const doc = new CadDocument()
+    const history = new HistoryStack(doc)
+    const a = doc.createLine({ x: 0, y: 0 }, { x: 1, y: 0 })
+    const b = doc.createLine({ x: 0, y: 1 }, { x: 1, y: 1 })
+    history.execute(new AddEntityCommand(a))
+    history.execute(new AddEntityCommand(b))
+    const layer = doc.getDefaultLayerId()
+    expect(doc.getEntityOrder(layer)[0]).toBe(b.id)
+    history.execute(new ReorderEntitiesCommand('back', [b.id]))
+    expect(doc.getEntityOrder(layer)).toEqual([a.id, b.id])
+    history.undo()
+    expect(doc.getEntityOrder(layer)[0]).toBe(b.id)
+    history.redo()
+    expect(doc.getEntityOrder(layer)).toEqual([a.id, b.id])
   })
 })
 
