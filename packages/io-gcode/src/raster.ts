@@ -56,8 +56,16 @@ export interface RasterPowerOptions {
   minPower?: number
   /** Alpha below this (0–255) is treated as transparent. Default 8. */
   alphaClip?: number
-  /** Quantize S to this many levels to merge runs / shrink files. Default 64. */
+  /**
+   * Quantize S to this many levels to merge runs / shrink files.
+   * Default 16 — enough tone for photos without per-pixel S chatter.
+   */
   powerLevels?: number
+  /**
+   * Keep the current run unless |ΔS| exceeds this many quantization steps.
+   * Default 1 — absorbs single-level noise between adjacent pixels.
+   */
+  powerHysteresis?: number
 }
 
 /**
@@ -76,7 +84,13 @@ export function rasterToPowerCuts(
   const gamma = options.gamma ?? 1
   const minPower = options.minPower ?? 0
   const alphaClip = options.alphaClip ?? 8
-  const levels = Math.max(2, Math.min(256, Math.round(options.powerLevels ?? 64)))
+  const levels = Math.max(2, Math.min(256, Math.round(options.powerLevels ?? 16)))
+  const step = maxPower / (levels - 1)
+  // Photos: absorb ±2 quant steps of noise; binary stays crisp (0).
+  const hysteresisSteps = Math.max(
+    0,
+    options.powerHysteresis ?? (levels <= 2 ? 0 : levels >= 32 ? 2 : 1),
+  )
   const alpha = sample.alpha
   const toWorld = sample.localToWorld ?? ((p: Vec2) => p)
   const out: RasterPowerCut[] = []
@@ -90,11 +104,13 @@ export function rasterToPowerCuts(
     if (darkness <= 1e-6) return Math.max(0, minPower)
     const shaped = Math.pow(darkness, gamma)
     const raw = maxPower * shaped
-    const step = maxPower / (levels - 1)
     const q = Math.round(raw / step) * step
     const rounded = Math.min(maxPower, Math.round(q))
     return rounded < minPower ? minPower : rounded
   }
+
+  /** Quantization bin — compare bins so integer S rounding does not break hysteresis. */
+  const levelOf = (pwr: number): number => Math.round(pwr / step)
 
   const opaque = (idx: number): boolean => {
     if (!alpha) return true
@@ -134,7 +150,12 @@ export function rasterToPowerCuts(
         continue
       }
       const pwr = powerOf(luma[idx]!)
-      if (runPower === pwr && runC0 >= 0) {
+      // Same S, or within ±hysteresisSteps quant bins of the open run.
+      if (
+        runC0 >= 0 &&
+        (pwr === runPower ||
+          Math.abs(levelOf(pwr) - levelOf(runPower)) <= hysteresisSteps)
+      ) {
         if (rtl) runC0 = c
         else runC1 = c + 1
         continue

@@ -88,6 +88,36 @@ describe('rasterToPowerCuts', () => {
     expect(cuts[1]!.points[0]!.x).toBeGreaterThanOrEqual(3 - 1e-6)
   })
 
+  it('hysteresis merges adjacent near-equal power pixels into one run', () => {
+    // One quantization step apart at 64 levels (~ΔS 16) — merges with hysteresis=1.
+    const luma = new Uint8Array([40, 44, 40, 44, 40, 44])
+    const tight = rasterToPowerCuts(
+      {
+        origin: { x: 0, y: 0 },
+        width: 6,
+        height: 1,
+        cols: 6,
+        rows: 1,
+        luma,
+      },
+      { maxPower: 1000, gamma: 1, powerLevels: 64, powerHysteresis: 0 },
+    )
+    const merged = rasterToPowerCuts(
+      {
+        origin: { x: 0, y: 0 },
+        width: 6,
+        height: 1,
+        cols: 6,
+        rows: 1,
+        luma,
+      },
+      { maxPower: 1000, gamma: 1, powerLevels: 64, powerHysteresis: 1 },
+    )
+    expect(tight.length).toBeGreaterThan(1)
+    expect(merged.length).toBeLessThan(tight.length)
+    expect(merged.length).toBe(1)
+  })
+
   it('binary (2 levels) only emits S=max and S=0', () => {
     const luma = new Uint8Array([0, 0, 255, 255, 128, 200])
     const cuts = rasterToPowerCuts(

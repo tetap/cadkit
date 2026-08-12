@@ -1,5 +1,5 @@
 import type { Editor } from '@cadkit/editor'
-import type { GcodeToolpathPlan } from '@cadkit/io-gcode'
+import type { GcodeMotion, GcodeToolpathPlan } from '@cadkit/io-gcode'
 import type { AppStore } from '../app/store.js'
 import { t } from '../i18n/index.js'
 
@@ -8,11 +8,40 @@ const TRAVEL = '#f59e0b'
 const GRID = '#e5e7eb'
 const BG = '#f8fafc'
 
+/** Rebuild full progress colouring only below this many motions; above: tip-only. */
+const FULL_PROGRESS_MOTIONS = 20_000
+/** Cap travel segments drawn in preview (keeps huge rasters interactive). */
+const MAX_TRAVEL_DRAW = 12_000
+/** Quantize laser power into this many visual buckets (fewer stroke() calls). */
+const POWER_BUCKETS = 32
+
 type Pt = { x: number; y: number }
+
+type StrokeBatch = { color: string; path: Path2D }
+
+type PathCache = {
+  travel: Path2D
+  rest: StrokeBatch[]
+  done: StrokeBatch[]
+  progress: number
+  tip: Pt | null
+  maxPower: number
+  /** Rasterized layer for huge plans — pan/zoom only blit this. */
+  bake: {
+    canvas: OffscreenCanvas | HTMLCanvasElement
+    originX: number
+    originY: number
+    pxPerMm: number
+  } | null
+}
+
+/** Bake Path2D to a bitmap when motion count exceeds this. */
+const BAKE_MOTIONS = 8_000
+const BAKE_MAX_EDGE = 2048
 
 /**
  * Modal G-code preview with its own canvas (independent of the editor WebGPU view).
- * Progress scrubber paints done=brand / rest=gray; travels are dashed amber.
+ * Large plans use world-space Path2D caches + rAF so pan/zoom stay interactive.
  */
 export function mountGcodePreview(
   editor: Editor,
@@ -27,6 +56,8 @@ export function mountGcodePreview(
   let ro: ResizeObserver | null = null
   let unsubStore: (() => void) | null = null
   let rebuildTimer = 0
+  let paintRaf = 0
+  let pathCache: PathCache | null = null
 
   /** Preview camera (CAD Y-down → canvas Y-down). */
   let scale = 1
@@ -39,6 +70,10 @@ export function mountGcodePreview(
 
   const qs = <T extends Element>(sel: string) => backdrop?.querySelector<T>(sel) ?? null
 
+  const invalidatePaths = () => {
+    pathCache = null
+  }
+
   const rebuild = () => {
     if (!open) return
     void (async () => {
@@ -46,6 +81,7 @@ export function mountGcodePreview(
       if (!open) return
       plan = next
       bounds = computeBounds(plan)
+      invalidatePaths()
       const cuts = plan.cuts.length
       const len = plan.cutLength
       const title = qs<HTMLElement>('[data-gcode-title]')
@@ -53,7 +89,7 @@ export function mountGcodePreview(
         title.textContent = `${t('gcodePreview')} · ${cuts} ${t('gcodePaths')} · ${len.toFixed(1)} mm`
       }
       fitView()
-      paint()
+      schedulePaint()
     })()
   }
 
@@ -65,7 +101,6 @@ export function mountGcodePreview(
 
   const fitView = () => {
     if (!canvas || !bounds) return
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
     const cssW = canvas.clientWidth
     const cssH = canvas.clientHeight
     if (cssW < 2 || cssH < 2) return
@@ -77,7 +112,6 @@ export function mountGcodePreview(
     const cy = (bounds.minY + bounds.maxY) / 2
     panX = cssW / 2 - cx * scale
     panY = cssH / 2 - cy * scale
-    void dpr
   }
 
   const worldToScreen = (p: Pt): Pt => ({
@@ -98,19 +132,134 @@ export function mountGcodePreview(
     }
   }
 
-  const paint = () => {
+  const ensurePathCache = (): PathCache | null => {
+    if (!plan) return null
+    const fullProgress = plan.motions.length <= FULL_PROGRESS_MOTIONS
+    // Huge plans: same bake for 0…1 (tip moves separately); only rebuild at 100%.
+    const keyProgress = fullProgress ? progress : progress >= 1 ? 1 : 0
+    if (pathCache && pathCache.progress === keyProgress) return pathCache
+
+    let maxPower = 1
+    for (const c of plan.cuts) maxPower = Math.max(maxPower, c.power)
+
+    const travel = new Path2D()
+    const restMap = new Map<string, Path2D>()
+    const doneMap = new Map<string, Path2D>()
+    const bucket = (tone: number, done: boolean) => {
+      const color = done ? cutColorDone(tone) : cutColorRest(tone)
+      const map = done ? doneMap : restMap
+      let p = map.get(color)
+      if (!p) {
+        p = new Path2D()
+        map.set(color, p)
+      }
+      return p
+    }
+    const addPoly = (path: Path2D, pts: readonly Pt[]) => {
+      if (pts.length < 2) return
+      path.moveTo(pts[0]!.x, pts[0]!.y)
+      for (let i = 1; i < pts.length; i++) path.lineTo(pts[i]!.x, pts[i]!.y)
+    }
+
+    let tip: Pt | null = null
+    const target = progress * plan.totalLength
+    let travelDrawn = 0
+
+    if (!fullProgress || progress <= 0) {
+      // Fast path: all cuts as "rest" (huge plans keep this bake while scrubbing).
+      for (const m of plan.motions) {
+        if (m.kind === 'travel') {
+          if (travelDrawn >= MAX_TRAVEL_DRAW) continue
+          travelDrawn++
+          travel.moveTo(m.travel.from.x, m.travel.from.y)
+          travel.lineTo(m.travel.to.x, m.travel.to.y)
+          continue
+        }
+        const tone = Math.max(0, Math.min(1, m.path.power / maxPower))
+        if (tone <= 0.001) continue // S0: skip — nearly invisible, huge count on binary images
+        addPoly(bucket(tone, false), m.path.points)
+      }
+    } else if (progress >= 1) {
+      for (const m of plan.motions) {
+        if (m.kind === 'travel') {
+          if (travelDrawn >= MAX_TRAVEL_DRAW) continue
+          travelDrawn++
+          travel.moveTo(m.travel.from.x, m.travel.from.y)
+          travel.lineTo(m.travel.to.x, m.travel.to.y)
+          continue
+        }
+        const tone = Math.max(0, Math.min(1, m.path.power / maxPower))
+        if (tone <= 0.001) continue
+        addPoly(bucket(tone, true), m.path.points)
+        tip = m.path.points[m.path.points.length - 1] ?? tip
+      }
+    } else {
+      for (const m of plan.motions) {
+        if (m.kind === 'travel') {
+          if (travelDrawn >= MAX_TRAVEL_DRAW) continue
+          travelDrawn++
+          travel.moveTo(m.travel.from.x, m.travel.from.y)
+          travel.lineTo(m.travel.to.x, m.travel.to.y)
+          continue
+        }
+        const tone = Math.max(0, Math.min(1, m.path.power / maxPower))
+        if (tone <= 0.001) continue
+        const { path, startDist, endDist } = m
+        if (endDist <= target + 1e-9) {
+          addPoly(bucket(tone, true), path.points)
+          tip = path.points[path.points.length - 1] ?? tip
+          continue
+        }
+        if (startDist >= target - 1e-9) {
+          addPoly(bucket(tone, false), path.points)
+          continue
+        }
+        const split = splitAtLength(path.points, target - startDist)
+        if (split.before.length >= 2) {
+          addPoly(bucket(tone, true), split.before)
+          tip = split.before[split.before.length - 1] ?? tip
+        }
+        if (split.after.length >= 2) addPoly(bucket(tone, false), split.after)
+      }
+    }
+
+    const toBatches = (map: Map<string, Path2D>): StrokeBatch[] => {
+      const out: StrokeBatch[] = []
+      for (const [color, path] of map) out.push({ color, path })
+      return out
+    }
+
+    const rest = toBatches(restMap)
+    const done = toBatches(doneMap)
+    const bake =
+      plan.motions.length >= BAKE_MOTIONS && bounds
+        ? bakePathsToCanvas(travel, rest, done, bounds)
+        : null
+
+    pathCache = {
+      travel,
+      rest,
+      done,
+      progress: keyProgress,
+      tip,
+      maxPower,
+      bake,
+    }
+    return pathCache
+  }
+
+  const paintNow = () => {
     if (!open || !canvas) return
-    const ctx = canvas.getContext('2d')
+    const ctx = canvas.getContext('2d', { alpha: false })
     if (!ctx) return
     const dpr = Math.min(window.devicePixelRatio || 1, 2)
     const w = canvas.clientWidth
     const h = canvas.clientHeight
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, w, h)
     ctx.fillStyle = BG
     ctx.fillRect(0, 0, w, h)
 
-    // Light grid in screen space
+    // Screen-space grid
     ctx.strokeStyle = GRID
     ctx.lineWidth = 1
     const step = 20
@@ -133,77 +282,91 @@ export function mountGcodePreview(
       return
     }
 
-    const strokePath = (pts: Pt[], color: string, width: number, dashed = false) => {
-      if (pts.length < 2) return
-      ctx.strokeStyle = color
-      ctx.lineWidth = width
+    const cache = ensurePathCache()
+    if (!cache) return
+
+    if (cache.bake) {
+      // One drawImage — interactive even with 100k+ segments.
+      const { canvas: baked, originX, originY, pxPerMm } = cache.bake
+      const screenScale = scale / pxPerMm
+      ctx.setTransform(
+        dpr * screenScale,
+        0,
+        0,
+        dpr * screenScale,
+        dpr * (panX + originX * scale),
+        dpr * (panY + originY * scale),
+      )
+      ctx.imageSmoothingEnabled = true
+      ctx.drawImage(baked, 0, 0)
+    } else {
+      // World-space stroke: pan/zoom = setTransform only (no per-point rebuild).
+      ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * panX, dpr * panY)
+      const inv = 1 / Math.max(scale, 1e-6)
+      const cutWidth = Math.max(0.45, Math.min(1.6, 0.9 / Math.sqrt(Math.max(scale, 0.2)))) * inv
+
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
-      ctx.setLineDash(dashed ? [6, 5] : [])
-      ctx.beginPath()
-      const s0 = worldToScreen(pts[0]!)
-      ctx.moveTo(s0.x, s0.y)
-      for (let i = 1; i < pts.length; i++) {
-        const s = worldToScreen(pts[i]!)
-        ctx.lineTo(s.x, s.y)
-      }
-      ctx.stroke()
+      ctx.strokeStyle = TRAVEL
+      ctx.lineWidth = 1.25 * inv
+      ctx.setLineDash([6 * inv, 5 * inv])
+      ctx.stroke(cache.travel)
       ctx.setLineDash([])
+
+      for (const b of cache.rest) {
+        ctx.strokeStyle = b.color
+        ctx.lineWidth = cutWidth
+        ctx.stroke(b.path)
+      }
+      for (const b of cache.done) {
+        ctx.strokeStyle = b.color
+        ctx.lineWidth = cutWidth + 0.35 * inv
+        ctx.stroke(b.path)
+      }
     }
 
-    // Travels under cuts
-    for (const m of plan.motions) {
-      if (m.kind !== 'travel') continue
-      strokePath([m.travel.from, m.travel.to], TRAVEL, 1.25, true)
-    }
-
-    // Cuts: shade by laser power so image rasters show tone (not a solid grey slab).
-    let maxPower = 1
-    for (const c of plan.cuts) maxPower = Math.max(maxPower, c.power)
-    const target = progress * plan.totalLength
-    const cutWidth = Math.max(0.45, Math.min(1.6, 0.9 / Math.sqrt(Math.max(scale, 0.2))))
-    let tip: Pt | null = null
-
-    for (const m of plan.motions) {
-      if (m.kind !== 'cut') continue
-      const { path, startDist, endDist } = m
-      const tone = Math.max(0, Math.min(1, path.power / maxPower))
-      if (endDist <= target + 1e-9) {
-        strokePath(path.points, cutColorDone(tone), cutWidth + 0.35)
-        tip = path.points[path.points.length - 1] ?? tip
-        continue
+    if (progress > 0 && progress < 1) {
+      const tip =
+        plan.motions.length > FULL_PROGRESS_MOTIONS
+          ? tipAtDistance(plan.motions, progress * plan.totalLength)
+          : cache.tip
+      if (tip) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        const s = worldToScreen(tip)
+        ctx.fillStyle = CUT_DONE
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, 4, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.strokeStyle = '#fff'
+        ctx.lineWidth = 1.5
+        ctx.stroke()
       }
-      if (startDist >= target - 1e-9) {
-        strokePath(path.points, cutColorRest(tone), cutWidth)
-        continue
-      }
-      const split = splitAtLength(path.points, target - startDist)
-      if (split.before.length >= 2) {
-        strokePath(split.before, cutColorDone(tone), cutWidth + 0.35)
-        tip = split.before[split.before.length - 1] ?? tip
-      }
-      if (split.after.length >= 2) strokePath(split.after, cutColorRest(tone), cutWidth)
-    }
-
-    if (progress > 0 && progress < 1 && tip) {
-      const s = worldToScreen(tip)
-      ctx.fillStyle = CUT_DONE
-      ctx.beginPath()
-      ctx.arc(s.x, s.y, 4, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#fff'
-      ctx.lineWidth = 1.5
-      ctx.stroke()
     }
   }
 
+  const schedulePaint = () => {
+    if (paintRaf) return
+    paintRaf = requestAnimationFrame(() => {
+      paintRaf = 0
+      paintNow()
+    })
+  }
+
   const setProgress = (value: number) => {
+    const prev = progress
     progress = Math.max(0, Math.min(1, value))
+    // Invalidate when the Path2D/bake colouring key would change.
+    if (plan) {
+      const full = plan.motions.length <= FULL_PROGRESS_MOTIONS
+      const prevKey = full ? prev : prev >= 1 ? 1 : 0
+      const nextKey = full ? progress : progress >= 1 ? 1 : 0
+      if (prevKey !== nextKey) invalidatePaths()
+    }
     const range = qs<HTMLInputElement>('[data-gcode-range]')
     if (range) range.value = String(Math.round(progress * 1000))
     const pct = qs<HTMLElement>('[data-gcode-pct]')
     if (pct) pct.textContent = `${Math.round(progress * 100)}%`
-    paint()
+    schedulePaint()
   }
 
   const onKey = (ev: KeyboardEvent) => {
@@ -225,7 +388,7 @@ export function mountGcodePreview(
       panY += ev.clientY - lastY
       lastX = ev.clientX
       lastY = ev.clientY
-      paint()
+      schedulePaint()
     })
     const endDrag = (ev: PointerEvent) => {
       if (!dragging) return
@@ -253,13 +416,13 @@ export function mountGcodePreview(
         panX = mx - worldX * next
         panY = my - worldY * next
         scale = next
-        paint()
+        schedulePaint()
       },
       { passive: false },
     )
     el.addEventListener('dblclick', () => {
       fitView()
-      paint()
+      schedulePaint()
     })
   }
 
@@ -319,7 +482,7 @@ export function mountGcodePreview(
         const h = canvas!.clientHeight
         panX = w / 2 - cx * scale
         panY = h / 2 - cy * scale
-        paint()
+        schedulePaint()
       })
       ro.observe(canvas)
     }
@@ -328,7 +491,7 @@ export function mountGcodePreview(
     })
     root.querySelector('[data-gcode-fit]')?.addEventListener('click', () => {
       fitView()
-      paint()
+      schedulePaint()
     })
     root.querySelector('[data-gcode-range]')?.addEventListener('input', (ev) => {
       setProgress(Number((ev.target as HTMLInputElement).value) / 1000)
@@ -340,6 +503,7 @@ export function mountGcodePreview(
     open = true
     mountDialog()
     progress = 0
+    invalidatePaths()
     document.addEventListener('keydown', onKey)
     unsubStore = store.subscribeKeys(
       ['uiEpoch', 'layerEpoch', 'canUndo', 'canRedo', 'localeTick'],
@@ -361,6 +525,10 @@ export function mountGcodePreview(
     if (!open) return
     open = false
     window.clearTimeout(rebuildTimer)
+    if (paintRaf) {
+      cancelAnimationFrame(paintRaf)
+      paintRaf = 0
+    }
     document.removeEventListener('keydown', onKey)
     unsubStore?.()
     unsubStore = null
@@ -371,6 +539,7 @@ export function mountGcodePreview(
     canvas = null
     plan = null
     bounds = null
+    invalidatePaths()
     store.set({ status: t('ready') })
     opts?.onOpenChange?.(false)
   }
@@ -410,7 +579,6 @@ function computeBounds(plan: GcodeToolpathPlan): {
   if (!Number.isFinite(minX)) {
     return { minX: 0, minY: 0, maxX: 100, maxY: 100 }
   }
-  // Pad tiny / degenerate boxes
   if (maxX - minX < 1e-3) {
     minX -= 1
     maxX += 1
@@ -425,15 +593,95 @@ function computeBounds(plan: GcodeToolpathPlan): {
 /** Remaining cuts: darker stroke = higher laser power; S0 nearly invisible. */
 function cutColorRest(tone: number): string {
   if (tone <= 0.001) return 'rgba(200,200,200,0.15)'
-  const v = Math.round(210 - tone * 185)
+  const q = Math.round(tone * (POWER_BUCKETS - 1)) / (POWER_BUCKETS - 1)
+  const v = Math.round(210 - q * 185)
   return `rgb(${v},${v},${v})`
 }
 
 /** Completed cuts: green, deeper when power is higher. */
 function cutColorDone(tone: number): string {
-  const g = Math.round(140 + tone * 70)
-  const r = Math.round(20 + (1 - tone) * 40)
-  return `rgb(${r},${g},${Math.round(70 + (1 - tone) * 40)})`
+  const q = Math.round(tone * (POWER_BUCKETS - 1)) / (POWER_BUCKETS - 1)
+  const g = Math.round(140 + q * 70)
+  const r = Math.round(20 + (1 - q) * 40)
+  return `rgb(${r},${g},${Math.round(70 + (1 - q) * 40)})`
+}
+
+function bakePathsToCanvas(
+  travel: Path2D,
+  rest: StrokeBatch[],
+  done: StrokeBatch[],
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+): PathCache['bake'] {
+  const pad = 2
+  const bw = Math.max(1e-6, bounds.maxX - bounds.minX)
+  const bh = Math.max(1e-6, bounds.maxY - bounds.minY)
+  const pxPerMm = Math.min(BAKE_MAX_EDGE / bw, BAKE_MAX_EDGE / bh, 40)
+  const w = Math.max(1, Math.ceil((bw + pad * 2) * pxPerMm))
+  const h = Math.max(1, Math.ceil((bh + pad * 2) * pxPerMm))
+  const originX = bounds.minX - pad
+  const originY = bounds.minY - pad
+
+  const canvas =
+    typeof OffscreenCanvas !== 'undefined'
+      ? new OffscreenCanvas(w, h)
+      : Object.assign(document.createElement('canvas'), { width: w, height: h })
+  if (!(canvas instanceof OffscreenCanvas)) {
+    ;(canvas as HTMLCanvasElement).width = w
+    ;(canvas as HTMLCanvasElement).height = h
+  }
+  const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null
+  if (!ctx) return null
+
+  ctx.setTransform(pxPerMm, 0, 0, pxPerMm, -originX * pxPerMm, -originY * pxPerMm)
+  const inv = 1 / pxPerMm
+  const cutWidth = Math.max(0.4 * inv, 0.08)
+
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.strokeStyle = TRAVEL
+  ctx.lineWidth = 1.1 * inv
+  ctx.setLineDash([5 * inv, 4 * inv])
+  ctx.stroke(travel)
+  ctx.setLineDash([])
+  for (const b of rest) {
+    ctx.strokeStyle = b.color
+    ctx.lineWidth = cutWidth
+    ctx.stroke(b.path)
+  }
+  for (const b of done) {
+    ctx.strokeStyle = b.color
+    ctx.lineWidth = cutWidth * 1.15
+    ctx.stroke(b.path)
+  }
+  return { canvas, originX, originY, pxPerMm }
+}
+
+function tipAtDistance(motions: readonly GcodeMotion[], target: number): Pt | null {
+  let lo = 0
+  let hi = motions.length - 1
+  let hit: GcodeMotion | null = null
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    const m = motions[mid]!
+    if (m.endDist < target) lo = mid + 1
+    else if (m.startDist > target) hi = mid - 1
+    else {
+      hit = m
+      break
+    }
+  }
+  if (!hit) hit = motions[Math.min(lo, motions.length - 1)] ?? null
+  if (!hit) return null
+  if (hit.kind === 'travel') {
+    const u = hit.endDist <= hit.startDist ? 1 : (target - hit.startDist) / (hit.endDist - hit.startDist)
+    const t = Math.max(0, Math.min(1, u))
+    return {
+      x: hit.travel.from.x + (hit.travel.to.x - hit.travel.from.x) * t,
+      y: hit.travel.from.y + (hit.travel.to.y - hit.travel.from.y) * t,
+    }
+  }
+  const split = splitAtLength(hit.path.points, Math.max(0, target - hit.startDist))
+  return split.before[split.before.length - 1] ?? hit.path.points[0] ?? null
 }
 
 function splitAtLength(points: readonly Pt[], length: number): { before: Pt[]; after: Pt[] } {

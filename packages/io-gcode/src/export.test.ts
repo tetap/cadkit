@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CadDocument } from '@cadkit/document'
 import { IDENTITY_TRANSFORM, createEntityId } from '@cadkit/types'
-import { buildToolpaths, exportGcode } from './export.js'
+import { buildToolpaths, emitGrbl, exportGcode } from './export.js'
 import { hatchPolygon } from './hatch.js'
 
 describe('hatchPolygon', () => {
@@ -47,7 +47,9 @@ describe('exportGcode', () => {
     expect(gcode).toContain('G90')
     expect(gcode).toContain('M3')
     expect(gcode).toContain('M5')
-    expect(gcode).toMatch(/G1 X10\.0 Y0\.0/)
+    // Y is modal from the preceding G0 park.
+    expect(gcode).toMatch(/G0 X0\.0 Y0\.0/)
+    expect(gcode).toMatch(/G1 X10\.0/)
     expect(gcode).toContain('M2')
   })
 
@@ -91,8 +93,9 @@ describe('exportGcode', () => {
     expect(gcode).toContain('S800')
     expect(gcode).toContain('F1500')
     expect(gcode).toContain('Layer Fill')
-    // Hatch produces multiple G1 moves beyond a single outline.
-    expect((gcode.match(/^G1 /gm) ?? []).length).toBeGreaterThan(2)
+    // Hatch: first segment spells G1; later same-mode moves may be bare X/Y.
+    expect(gcode).toMatch(/^G1 /m)
+    expect((gcode.match(/^(?:G1 )?X/gm) ?? []).length).toBeGreaterThan(2)
   })
 
   it('respects fillAngle for bidirectional and cross-hatch', () => {
@@ -346,5 +349,76 @@ describe('exportGcode', () => {
     expect(gcode).toMatch(/S600/)
     expect(gcode).toMatch(/S0\b/)
     expect(gcode).toMatch(/G1 /)
+  })
+
+  it('compacts raster cuts: modal G1, omit unchanged Y, M3 S on power change', () => {
+    const gcode = emitGrbl({
+      motions: [
+        {
+          kind: 'cut',
+          path: {
+            points: [
+              { x: 87.719, y: 96.411 },
+              { x: 86.5, y: 96.411 },
+            ],
+            layerId: 'L' as never,
+            layerName: 'Image',
+            feed: 1200,
+            power: 698,
+            length: 1.219,
+          },
+          startDist: 0,
+          endDist: 1.219,
+        },
+        {
+          kind: 'cut',
+          path: {
+            points: [
+              { x: 86.5, y: 96.411 },
+              { x: 85.3, y: 96.411 },
+            ],
+            layerId: 'L' as never,
+            layerName: 'Image',
+            feed: 1200,
+            power: 685,
+            length: 1.2,
+          },
+          startDist: 1.219,
+          endDist: 2.419,
+        },
+        {
+          kind: 'cut',
+          path: {
+            points: [
+              { x: 85.3, y: 96.411 },
+              { x: 84.7, y: 96.411 },
+            ],
+            layerId: 'L' as never,
+            layerName: 'Image',
+            feed: 1200,
+            power: 673,
+            length: 0.6,
+          },
+          startDist: 2.419,
+          endDist: 3.019,
+        },
+      ],
+      cuts: [],
+      totalLength: 3.019,
+      cutLength: 3.019,
+      travelSpeed: 3000,
+      flipY: false,
+      yBase: 0,
+      decimals: 3,
+      laserOn: 'M3',
+      laserOff: 'M5',
+    })
+    // G0 parks at start (Y once); M3 S then modal G1 / bare X for each power run.
+    expect(gcode).toMatch(/G0 X87\.719 Y96\.411/)
+    expect(gcode).toMatch(/M3 S698\nG1 X86\.500(?: F[\d.]+)?/)
+    expect(gcode).toMatch(/M3 S685\nX85\.300/)
+    expect(gcode).toMatch(/M3 S673\nX84\.700/)
+    expect(gcode.match(/Y96\.411/g) ?? []).toHaveLength(1)
+    expect((gcode.match(/^G1 /gm) ?? []).length).toBe(1)
   })
 })

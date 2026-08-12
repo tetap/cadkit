@@ -20,7 +20,7 @@ export {
 /**
  * Export document geometry as GRBL laser G-code.
  * Uses per-layer `LayerGcodeParams` (mode / spacing / power / speed / passes).
- * Motion is travel-optimized (chain + NN + 2-opt); F/S words are deduped.
+ * Compact raster style: modal G0/G1, omit unchanged XY, M3 S on power change.
  */
 export function exportGcode(input: GcodeExportInput, options: GcodeExportOptions = {}): string {
   const plan = buildToolpaths(input, options)
@@ -44,30 +44,61 @@ export function emitGrbl(plan: GcodeToolpathPlan): string {
   let lastPower: number | null = null
   let laserOn = false
   let lastLayer = ''
-  let lastX: number | null = null
-  let lastY: number | null = null
+  /** Modal motion word: once set, bare `X…` / `Y…` continues that mode. */
+  let lastMotion: 'G0' | 'G1' | null = null
+  let lastXStr: string | null = null
+  let lastYStr: string | null = null
 
-  const at = (x: number, y: number) =>
-    lastX != null &&
-    lastY != null &&
-    Math.hypot(lastX - x, lastY - y) < 1e-6
+  const atFmt = (xStr: string, yStr: string) => lastXStr === xStr && lastYStr === yStr
+
+  /**
+   * Emit a move. Repeats G0/G1 only when the motion mode changes;
+   * omits X/Y/F words that match the last emitted value.
+   */
+  const axisMove = (
+    code: 'G0' | 'G1',
+    x: number,
+    y: number,
+    opts?: { feed?: number },
+  ) => {
+    const xStr = fmt(x)
+    const yStr = fmt(y)
+    const parts: string[] = []
+    if (lastMotion !== code) parts.push(code)
+    if (lastXStr !== xStr) parts.push(`X${xStr}`)
+    if (lastYStr !== yStr) parts.push(`Y${yStr}`)
+    if (opts?.feed != null && opts.feed !== lastFeed) {
+      parts.push(`F${fmt(opts.feed)}`)
+      lastFeed = opts.feed
+    }
+    if (!parts.length) return
+    lines.push(parts.join(' '))
+    lastMotion = code
+    lastXStr = xStr
+    lastYStr = yStr
+  }
+
+  const setPower = (power: number) => {
+    const s = Math.round(power)
+    if (laserOn && lastPower === s) return
+    lines.push(`${plan.laserOn} S${s}`)
+    laserOn = true
+    lastPower = s
+    // M3 does not cancel motion mode on GRBL, but be explicit next move if needed.
+  }
 
   for (const m of plan.motions) {
     if (m.kind === 'travel') {
       if (laserOn) {
         lines.push(plan.laserOff)
         laserOn = false
+        lastPower = null
       }
-      const { to, feed } = m.travel
-      const mx = to.x
-      const my = mapY(to.y)
-      if (!at(mx, my)) {
-        const fWord = feed !== lastFeed ? ` F${fmt(feed)}` : ''
-        lastFeed = feed
-        lines.push(`G0 X${fmt(mx)} Y${fmt(my)}${fWord}`)
-        lastX = mx
-        lastY = my
-      }
+      const mx = m.travel.to.x
+      const my = mapY(m.travel.to.y)
+      const xStr = fmt(mx)
+      const yStr = fmt(my)
+      if (!atFmt(xStr, yStr)) axisMove('G0', mx, my, { feed: m.travel.feed })
       continue
     }
 
@@ -79,35 +110,27 @@ export function emitGrbl(plan: GcodeToolpathPlan): string {
     const first = path.points[0]!
     const fx = first.x
     const fy = mapY(first.y)
-    if (!at(fx, fy)) {
+    const fxStr = fmt(fx)
+    const fyStr = fmt(fy)
+    if (!atFmt(fxStr, fyStr)) {
       if (laserOn) {
         lines.push(plan.laserOff)
         laserOn = false
+        lastPower = null
       }
-      const fTravel = plan.travelSpeed !== lastFeed ? ` F${fmt(plan.travelSpeed)}` : ''
-      lastFeed = plan.travelSpeed
-      lines.push(`G0 X${fmt(fx)} Y${fmt(fy)}${fTravel}`)
-      lastX = fx
-      lastY = fy
+      axisMove('G0', fx, fy, { feed: plan.travelSpeed })
     }
-    if (!laserOn || lastPower !== path.power) {
-      lines.push(`${plan.laserOn} S${Math.round(path.power)}`)
-      laserOn = true
-      lastPower = path.power
-    }
+
+    setPower(path.power)
+
     for (let i = 1; i < path.points.length; i++) {
       const p = path.points[i]!
-      const x = p.x
-      const y = mapY(p.y)
-      const fWord = path.feed !== lastFeed ? ` F${fmt(path.feed)}` : ''
-      lastFeed = path.feed
-      lines.push(`G1 X${fmt(x)} Y${fmt(y)}${fWord}`)
-      lastX = x
-      lastY = y
+      axisMove('G1', p.x, mapY(p.y), { feed: path.feed })
     }
   }
 
   if (laserOn) lines.push(plan.laserOff)
+  // Home: always spell G0 + both axes (clear modal state for controllers).
   lines.push('G0 X0 Y0')
   lines.push('M2')
   return `${lines.join('\n')}\n`

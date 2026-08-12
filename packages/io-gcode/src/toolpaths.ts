@@ -231,7 +231,8 @@ export function buildToolpaths(
           maxPower: gcode.power,
           gamma: 1,
           minPower: 0,
-          powerLevels: mode === 'dither' ? 2 : 64,
+          // 16 levels + hysteresis in rasterToPowerCuts keeps files compact.
+          powerLevels: mode === 'dither' ? 2 : 16,
         })
         for (let pass = 0; pass < gcode.passes; pass++) {
           for (const seg of segs) {
