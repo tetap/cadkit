@@ -752,8 +752,8 @@ export class Editor {
       gcode: {
         ...DEFAULT_LAYER_GCODE,
         mode: 'image',
-        // Denser scan + moderate feed for grayscale photo engraving.
-        lineSpacing: 0.08,
+        // Photo engraving defaults: spacing balances detail vs file size.
+        lineSpacing: 0.1,
         power: 800,
         speed: 1800,
       },
@@ -2311,12 +2311,14 @@ async function sampleBitmapRgba(
   return ctx.getImageData(0, 0, w, h).data
 }
 
-/** Rec.709 luma + mild contrast stretch so photos keep punch after PWM mapping. */
+/**
+ * Rec.709 luma with soft percentile stretch (2%–98%).
+ * Avoids full min/max stretch that turns grey backgrounds into mid-burn fill.
+ */
 function rgbaToLuma(rgba: Uint8ClampedArray, cols: number, rows: number): Uint8Array {
   const n = cols * rows
   const luma = new Uint8Array(n)
-  let min = 255
-  let max = 0
+  const hist = new Uint32Array(256)
   for (let i = 0; i < n; i++) {
     const o = i * 4
     const a = rgba[o + 3]! / 255
@@ -2326,14 +2328,33 @@ function rgbaToLuma(rgba: Uint8ClampedArray, cols: number, rows: number): Uint8A
         ? 255
         : Math.round(0.2126 * rgba[o]! + 0.7152 * rgba[o + 1]! + 0.0722 * rgba[o + 2]!)
     luma[i] = y
-    if (y < min) min = y
-    if (y > max) max = y
+    hist[y]!++
   }
-  // Stretch only when the image has usable range (avoid amplifying flat fills).
-  if (max - min >= 16) {
-    const scale = 255 / (max - min)
+  const loTarget = Math.max(1, Math.floor(n * 0.02))
+  const hiTarget = Math.max(loTarget + 1, Math.ceil(n * 0.98))
+  let acc = 0
+  let lo = 0
+  let hi = 255
+  for (let v = 0; v < 256; v++) {
+    acc += hist[v]!
+    if (acc >= loTarget) {
+      lo = v
+      break
+    }
+  }
+  acc = 0
+  for (let v = 255; v >= 0; v--) {
+    acc += hist[v]!
+    if (acc >= n - hiTarget) {
+      hi = v
+      break
+    }
+  }
+  if (hi - lo >= 24) {
+    const scale = 255 / (hi - lo)
     for (let i = 0; i < n; i++) {
-      luma[i] = Math.round((luma[i]! - min) * scale)
+      const y = Math.min(hi, Math.max(lo, luma[i]!))
+      luma[i] = Math.round((y - lo) * scale)
     }
   }
   return luma

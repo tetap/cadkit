@@ -41,12 +41,17 @@ export interface RasterPowerOptions {
   maxPower: number
   /**
    * Tone curve: power ∝ darkness^gamma.
-   * <1 boosts midtones (typical laser photo). Default 0.75.
+   * >1 suppresses light tones (keeps backgrounds from filling solid). Default 1.35.
    */
   gamma?: number
-  /** Skip almost-white pixels below this power. Default max(1, 2% of max). */
+  /**
+   * Skip pixels whose mapped power is below this.
+   * Default ~15% of max — prevents light grey backgrounds from burning solid.
+   */
   minPower?: number
-  /** Quantize S to this many levels to merge runs / shrink files. Default 64. */
+  /** Hard skip when luma ≥ this (0–255). Default 240. */
+  whiteClip?: number
+  /** Quantize S to this many levels to merge runs / shrink files. Default 48. */
   powerLevels?: number
 }
 
@@ -63,9 +68,10 @@ export function rasterToPowerCuts(
   if (luma.length < cols * rows) return []
 
   const maxPower = Math.max(1, options.maxPower)
-  const gamma = options.gamma ?? 0.75
-  const minPower = options.minPower ?? Math.max(1, Math.round(maxPower * 0.02))
-  const levels = Math.max(2, Math.min(256, Math.round(options.powerLevels ?? 64)))
+  const gamma = options.gamma ?? 1.35
+  const minPower = options.minPower ?? Math.max(1, Math.round(maxPower * 0.15))
+  const whiteClip = options.whiteClip ?? 240
+  const levels = Math.max(2, Math.min(256, Math.round(options.powerLevels ?? 48)))
   const toWorld = sample.localToWorld ?? ((p: Vec2) => p)
   const out: RasterPowerCut[] = []
 
@@ -73,7 +79,9 @@ export function rasterToPowerCuts(
   const yAt = (r: number) => origin.y + ((r + 0.5) / rows) * height
 
   const powerOf = (lumaValue: number): number => {
-    const darkness = 1 - Math.min(255, Math.max(0, lumaValue)) / 255
+    const y = Math.min(255, Math.max(0, lumaValue))
+    if (y >= whiteClip) return 0
+    const darkness = 1 - y / 255
     if (darkness <= 1e-6) return 0
     const shaped = Math.pow(darkness, gamma)
     const raw = maxPower * shaped

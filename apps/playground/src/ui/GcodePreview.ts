@@ -1,10 +1,9 @@
 import type { Editor } from '@cadkit/editor'
-import { samplePlanProgress, type GcodeToolpathPlan } from '@cadkit/io-gcode'
+import type { GcodeToolpathPlan } from '@cadkit/io-gcode'
 import type { AppStore } from '../app/store.js'
 import { t } from '../i18n/index.js'
 
 const CUT_DONE = '#22c55e'
-const CUT_REST = '#9ca3af'
 const TRAVEL = '#f59e0b'
 const GRID = '#e5e7eb'
 const BG = '#f8fafc'
@@ -134,52 +133,67 @@ export function mountGcodePreview(
       return
     }
 
-    const strokePaths = (paths: Pt[][], color: string, width: number, dashed = false) => {
+    const strokePath = (pts: Pt[], color: string, width: number, dashed = false) => {
+      if (pts.length < 2) return
       ctx.strokeStyle = color
       ctx.lineWidth = width
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
       ctx.setLineDash(dashed ? [6, 5] : [])
-      for (const pts of paths) {
-        if (pts.length < 2) continue
-        ctx.beginPath()
-        const s0 = worldToScreen(pts[0]!)
-        ctx.moveTo(s0.x, s0.y)
-        for (let i = 1; i < pts.length; i++) {
-          const s = worldToScreen(pts[i]!)
-          ctx.lineTo(s.x, s.y)
-        }
-        ctx.stroke()
+      ctx.beginPath()
+      const s0 = worldToScreen(pts[0]!)
+      ctx.moveTo(s0.x, s0.y)
+      for (let i = 1; i < pts.length; i++) {
+        const s = worldToScreen(pts[i]!)
+        ctx.lineTo(s.x, s.y)
       }
+      ctx.stroke()
       ctx.setLineDash([])
     }
 
     // Travels under cuts
-    const travels: Pt[][] = []
     for (const m of plan.motions) {
       if (m.kind !== 'travel') continue
-      travels.push([m.travel.from, m.travel.to])
+      strokePath([m.travel.from, m.travel.to], TRAVEL, 1.25, true)
     }
-    strokePaths(travels, TRAVEL, 1.25, true)
 
-    const { done, remaining } = samplePlanProgress(plan, progress)
-    strokePaths(remaining, CUT_REST, 1.75)
-    strokePaths(done, CUT_DONE, 2.25)
+    // Cuts: shade by laser power so image rasters show tone (not a solid grey slab).
+    let maxPower = 1
+    for (const c of plan.cuts) maxPower = Math.max(maxPower, c.power)
+    const target = progress * plan.totalLength
+    const cutWidth = Math.max(0.45, Math.min(1.6, 0.9 / Math.sqrt(Math.max(scale, 0.2))))
+    let tip: Pt | null = null
 
-    // Progress tip
-    if (progress > 0 && progress < 1 && done.length) {
-      const last = done[done.length - 1]!
-      const tip = last[last.length - 1]
-      if (tip) {
-        const s = worldToScreen(tip)
-        ctx.fillStyle = CUT_DONE
-        ctx.beginPath()
-        ctx.arc(s.x, s.y, 4, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.strokeStyle = '#fff'
-        ctx.lineWidth = 1.5
-        ctx.stroke()
+    for (const m of plan.motions) {
+      if (m.kind !== 'cut') continue
+      const { path, startDist, endDist } = m
+      const tone = Math.max(0, Math.min(1, path.power / maxPower))
+      if (endDist <= target + 1e-9) {
+        strokePath(path.points, cutColorDone(tone), cutWidth + 0.35)
+        tip = path.points[path.points.length - 1] ?? tip
+        continue
       }
+      if (startDist >= target - 1e-9) {
+        strokePath(path.points, cutColorRest(tone), cutWidth)
+        continue
+      }
+      const split = splitAtLength(path.points, target - startDist)
+      if (split.before.length >= 2) {
+        strokePath(split.before, cutColorDone(tone), cutWidth + 0.35)
+        tip = split.before[split.before.length - 1] ?? tip
+      }
+      if (split.after.length >= 2) strokePath(split.after, cutColorRest(tone), cutWidth)
+    }
+
+    if (progress > 0 && progress < 1 && tip) {
+      const s = worldToScreen(tip)
+      ctx.fillStyle = CUT_DONE
+      ctx.beginPath()
+      ctx.arc(s.x, s.y, 4, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.strokeStyle = '#fff'
+      ctx.lineWidth = 1.5
+      ctx.stroke()
     }
   }
 
@@ -406,4 +420,37 @@ function computeBounds(plan: GcodeToolpathPlan): {
     maxY += 1
   }
   return { minX, minY, maxX, maxY }
+}
+
+/** Remaining cuts: darker stroke = higher laser power (photo readable). */
+function cutColorRest(tone: number): string {
+  const v = Math.round(210 - tone * 185)
+  return `rgb(${v},${v},${v})`
+}
+
+/** Completed cuts: green, deeper when power is higher. */
+function cutColorDone(tone: number): string {
+  const g = Math.round(140 + tone * 70)
+  const r = Math.round(20 + (1 - tone) * 40)
+  return `rgb(${r},${g},${Math.round(70 + (1 - tone) * 40)})`
+}
+
+function splitAtLength(points: readonly Pt[], length: number): { before: Pt[]; after: Pt[] } {
+  if (length <= 0) return { before: [], after: points.map((p) => ({ ...p })) }
+  let acc = 0
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1]!
+    const b = points[i]!
+    const seg = Math.hypot(b.x - a.x, b.y - a.y)
+    if (acc + seg >= length - 1e-12) {
+      const u = seg < 1e-12 ? 0 : (length - acc) / seg
+      const mid = { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u }
+      return {
+        before: [...points.slice(0, i).map((p) => ({ ...p })), mid],
+        after: [mid, ...points.slice(i).map((p) => ({ ...p }))],
+      }
+    }
+    acc += seg
+  }
+  return { before: points.map((p) => ({ ...p })), after: [] }
 }

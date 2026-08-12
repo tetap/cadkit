@@ -44,8 +44,8 @@ describe('rasterToCutPaths', () => {
 })
 
 describe('rasterToPowerCuts', () => {
-  it('maps black→max power and skips white', () => {
-    const luma = new Uint8Array([0, 128, 255, 255])
+  it('maps black→max power and skips white / near-white', () => {
+    const luma = new Uint8Array([0, 128, 250, 255])
     const cuts = rasterToPowerCuts(
       {
         origin: { x: 0, y: 0 },
@@ -55,18 +55,38 @@ describe('rasterToPowerCuts', () => {
         rows: 1,
         luma,
       },
-      { maxPower: 1000, gamma: 1, powerLevels: 256, minPower: 1 },
+      { maxPower: 1000, gamma: 1, powerLevels: 256, minPower: 1, whiteClip: 245 },
     )
     expect(cuts.length).toBeGreaterThanOrEqual(2)
     const powers = cuts.map((c) => c.power)
     expect(Math.max(...powers)).toBe(1000)
     expect(powers.every((p) => p > 0 && p <= 1000)).toBe(true)
-    // Mid gray should be weaker than black.
+    // Near-white (250) and white are skipped.
+    expect(cuts.every((c) => c.points[0]!.x < 2)).toBe(true)
     const black = cuts.find((c) => c.points[0]!.x === 0)
     const mid = cuts.find((c) => c.points[0]!.x === 1)
     expect(black?.power).toBe(1000)
     expect(mid?.power).toBeGreaterThan(0)
     expect(mid!.power).toBeLessThan(1000)
+  })
+
+  it('default mapping skips light greys so photos are not a solid burn', () => {
+    const luma = new Uint8Array([0, 40, 200, 230])
+    const cuts = rasterToPowerCuts(
+      {
+        origin: { x: 0, y: 0 },
+        width: 4,
+        height: 1,
+        cols: 4,
+        rows: 1,
+        luma,
+      },
+      { maxPower: 800 },
+    )
+    // Dark pixels burn; light greys (200+) clipped by minPower / gamma / whiteClip.
+    expect(cuts.some((c) => c.power > 400)).toBe(true)
+    expect(cuts.every((c) => c.points.every((p) => p.x <= 2.001))).toBe(true)
+    expect(cuts.length).toBeLessThan(4)
   })
 
   it('merges adjacent equal-power pixels and snakes rows', () => {
