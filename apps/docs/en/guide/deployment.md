@@ -12,10 +12,14 @@ Pushes to `main` trigger [Deploy Playground](https://github.com/tetap/cadkit/act
 | Field | Value |
 |-------|--------|
 | **Source** | **Deploy from a branch** |
-| **Branch** | **`gh-pages`** |
+| **Branch** | **`gh-pages`** ← not `main` |
 | **Folder** | **/ (root)** |
 
-Click **Save**.  
+Click **Save**.
+
+> ⚠️ Choosing **`main`** makes GitHub Jekyll-render the README (looks like a docs site), **not** the playground.  
+> Correct page title is **CADKit Editor** with a tool rail and canvas.
+
 If `gh-pages` is missing from the dropdown, wait for **Deploy Playground** to finish once (it creates the branch), then refresh the Pages settings page.
 
 Local preview:

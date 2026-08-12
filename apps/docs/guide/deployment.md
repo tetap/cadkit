@@ -14,10 +14,14 @@
 | 项 | 选择 |
 |----|------|
 | **Source** | **Deploy from a branch** |
-| **Branch** | **`gh-pages`** |
+| **Branch** | **`gh-pages`** ← 不要选 `main` |
 | **Folder** | **/ (root)** |
 
-点 **Save**。  
+点 **Save**。
+
+> ⚠️ 若选成 **`main`**，GitHub 会用 Jekyll 渲染仓库 README，页面会变成「文档/介绍站」，**不是** playground 编辑器。  
+> 正确时标题应是 **CADKit Editor**，左侧有工具栏、中间有画布。
+
 若下拉里还没有 `gh-pages`：先等 Actions 里 **Deploy Playground** 跑成功一次（会自动创建该分支），再刷新 Pages 设置页。
 
 本地预览 Pages 产物：
