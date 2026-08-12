@@ -16,6 +16,11 @@ export interface ImageRasterSample {
   rows: number
   luma: Uint8Array
   /**
+   * Optional opacity 0–255. When set, only transparent pixels create travel gaps.
+   * Opaque near-white uses low / zero power instead of skipping.
+   */
+  alpha?: Uint8Array
+  /**
    * `grayscale` (default): PWM scanlines with variable S per tone.
    * `dither`: binary burn runs (Floyd / threshold already applied in luma).
    */
@@ -29,10 +34,10 @@ export interface ImageRasterSample {
   localToWorld?: (p: Vec2) => Vec2
 }
 
-/** One laser-on segment with constant power. */
+/** One laser segment with constant power (S=0 = move without burn). */
 export interface RasterPowerCut {
   points: Vec2[]
-  /** GRBL S-word for this segment. */
+  /** GRBL S-word for this segment (0 allowed — continuous scan, no travel). */
   power: number
 }
 
@@ -41,23 +46,23 @@ export interface RasterPowerOptions {
   maxPower: number
   /**
    * Tone curve: power ∝ darkness^gamma.
-   * >1 suppresses light tones (keeps backgrounds from filling solid). Default 1.35.
+   * Default 1.0 (linear). Slightly >1 softens light areas without skipping them.
    */
   gamma?: number
   /**
-   * Skip pixels whose mapped power is below this.
-   * Default ~15% of max — prevents light grey backgrounds from burning solid.
+   * Floor for opaque pixels (after mapping). Default 0 — white uses S0, not travel.
+   * Transparent pixels never emit cuts (travel gap) regardless of this.
    */
   minPower?: number
-  /** Hard skip when luma ≥ this (0–255). Default 240. */
-  whiteClip?: number
-  /** Quantize S to this many levels to merge runs / shrink files. Default 48. */
+  /** Alpha below this (0–255) is treated as transparent. Default 8. */
+  alphaClip?: number
+  /** Quantize S to this many levels to merge runs / shrink files. Default 64. */
   powerLevels?: number
 }
 
 /**
  * Photo-style grayscale engraving: serpentine scanlines with variable power.
- * Adjacent equal-S pixels merge into one G1; near-white is skipped (travel gap).
+ * Opaque pixels always stay on the scanline (S may be 0); only transparency gaps travel.
  */
 export function rasterToPowerCuts(
   sample: ImageRasterSample,
@@ -68,10 +73,11 @@ export function rasterToPowerCuts(
   if (luma.length < cols * rows) return []
 
   const maxPower = Math.max(1, options.maxPower)
-  const gamma = options.gamma ?? 1.35
-  const minPower = options.minPower ?? Math.max(1, Math.round(maxPower * 0.15))
-  const whiteClip = options.whiteClip ?? 240
-  const levels = Math.max(2, Math.min(256, Math.round(options.powerLevels ?? 48)))
+  const gamma = options.gamma ?? 1
+  const minPower = options.minPower ?? 0
+  const alphaClip = options.alphaClip ?? 8
+  const levels = Math.max(2, Math.min(256, Math.round(options.powerLevels ?? 64)))
+  const alpha = sample.alpha
   const toWorld = sample.localToWorld ?? ((p: Vec2) => p)
   const out: RasterPowerCut[] = []
 
@@ -80,15 +86,19 @@ export function rasterToPowerCuts(
 
   const powerOf = (lumaValue: number): number => {
     const y = Math.min(255, Math.max(0, lumaValue))
-    if (y >= whiteClip) return 0
     const darkness = 1 - y / 255
-    if (darkness <= 1e-6) return 0
+    if (darkness <= 1e-6) return Math.max(0, minPower)
     const shaped = Math.pow(darkness, gamma)
     const raw = maxPower * shaped
-    // Quantize so nearby tones share an S-word and merge into longer G1s.
     const step = maxPower / (levels - 1)
     const q = Math.round(raw / step) * step
-    return q < minPower ? 0 : Math.min(maxPower, Math.round(q))
+    const rounded = Math.min(maxPower, Math.round(q))
+    return rounded < minPower ? minPower : rounded
+  }
+
+  const opaque = (idx: number): boolean => {
+    if (!alpha) return true
+    return (alpha[idx] ?? 255) >= alphaClip
   }
 
   for (let r = 0; r < rows; r++) {
@@ -98,7 +108,7 @@ export function rasterToPowerCuts(
     let runC1 = -1
 
     const flush = () => {
-      if (runPower <= 0 || runC0 < 0 || runC1 <= runC0) {
+      if (runPower < 0 || runC0 < 0 || runC1 <= runC0) {
         runPower = -1
         runC0 = -1
         runC1 = -1
@@ -118,13 +128,13 @@ export function rasterToPowerCuts(
 
     for (let i = 0; i < cols; i++) {
       const c = rtl ? cols - 1 - i : i
-      const pwr = powerOf(luma[r * cols + c]!)
-      if (pwr <= 0) {
+      const idx = r * cols + c
+      if (!opaque(idx)) {
         flush()
         continue
       }
+      const pwr = powerOf(luma[idx]!)
       if (runPower === pwr && runC0 >= 0) {
-        // Extend toward the direction of travel.
         if (rtl) runC0 = c
         else runC1 = c + 1
         continue
@@ -149,6 +159,8 @@ export function rasterToCutPaths(sample: ImageRasterSample): Vec2[][] {
   if (luma.length < cols * rows) return []
   const burnMax = sample.burnMax ?? 127
   const toWorld = sample.localToWorld ?? ((p: Vec2) => p)
+  const alpha = sample.alpha
+  const alphaClip = 8
   const paths: Vec2[][] = []
 
   const xAt = (c: number) => origin.x + (c / cols) * width
@@ -158,7 +170,9 @@ export function rasterToCutPaths(sample: ImageRasterSample): Vec2[][] {
     const runs: Array<{ c0: number; c1: number }> = []
     let runStart = -1
     for (let c = 0; c <= cols; c++) {
-      const on = c < cols && luma[r * cols + c]! <= burnMax
+      const idx = r * cols + c
+      const opaque = c < cols && (!alpha || (alpha[idx] ?? 255) >= alphaClip)
+      const on = opaque && luma[idx]! <= burnMax
       if (on && runStart < 0) runStart = c
       if (!on && runStart >= 0) {
         runs.push({ c0: runStart, c1: c })

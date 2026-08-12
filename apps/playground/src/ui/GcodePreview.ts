@@ -422,8 +422,9 @@ function computeBounds(plan: GcodeToolpathPlan): {
   return { minX, minY, maxX, maxY }
 }
 
-/** Remaining cuts: darker stroke = higher laser power (photo readable). */
+/** Remaining cuts: darker stroke = higher laser power; S0 nearly invisible. */
 function cutColorRest(tone: number): string {
+  if (tone <= 0.001) return 'rgba(200,200,200,0.15)'
   const v = Math.round(210 - tone * 185)
   return `rgb(${v},${v},${v})`
 }

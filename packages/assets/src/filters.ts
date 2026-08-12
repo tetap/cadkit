@@ -179,6 +179,105 @@ export function applyThresholdRgba(
   }
 }
 
+/**
+ * Apply a filter stack to an RGBA buffer (0–255) for CPU consumers (e.g. G-code).
+ * Mirrors canvas tone filters; custom WGSL bodies are skipped on CPU.
+ */
+export function applyFilterStackRgba(
+  data: Uint8ClampedArray | Uint8Array,
+  w: number,
+  h: number,
+  filters: readonly FilterOp[],
+): void {
+  if (!filters.length || w < 1 || h < 1) return
+  for (const op of filters) {
+    if (op.type === 'floydSteinberg') {
+      applyFloydSteinbergRgba(data, w, h, op.params)
+      continue
+    }
+    if (op.type === 'threshold') {
+      applyThresholdRgba(data, w, h, op.params)
+      continue
+    }
+    if (op.type === 'blur') {
+      const radius = Math.max(0, Math.round(op.params.amount ?? op.params.radius ?? 1))
+      if (radius > 0) applyGaussianBlurRgba(data, w, h, radius)
+      continue
+    }
+    if (op.type === 'custom') continue
+    for (let i = 0; i < data.length; i += 4) {
+      const out = applyBuiltinFilterCpu(
+        [data[i]! / 255, data[i + 1]! / 255, data[i + 2]! / 255, data[i + 3]! / 255],
+        op,
+      )
+      data[i] = Math.round(out[0]! * 255)
+      data[i + 1] = Math.round(out[1]! * 255)
+      data[i + 2] = Math.round(out[2]! * 255)
+      data[i + 3] = Math.round(out[3]! * 255)
+    }
+  }
+}
+
+/** Separable Gaussian blur on RGBA (alpha also blurred). */
+export function applyGaussianBlurRgba(
+  data: Uint8ClampedArray | Uint8Array,
+  w: number,
+  h: number,
+  radiusPx: number,
+): void {
+  const kernel = gaussianKernel1D(radiusPx)
+  const r = (kernel.length - 1) >> 1
+  if (r < 1) return
+  const src = new Uint8ClampedArray(data)
+  const tmp = new Uint8ClampedArray(data.length)
+  // Horizontal
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let rSum = 0
+      let gSum = 0
+      let bSum = 0
+      let aSum = 0
+      for (let k = -r; k <= r; k++) {
+        const xx = Math.min(w - 1, Math.max(0, x + k))
+        const wgt = kernel[k + r]!
+        const i = (y * w + xx) * 4
+        rSum += src[i]! * wgt
+        gSum += src[i + 1]! * wgt
+        bSum += src[i + 2]! * wgt
+        aSum += src[i + 3]! * wgt
+      }
+      const o = (y * w + x) * 4
+      tmp[o] = Math.round(rSum)
+      tmp[o + 1] = Math.round(gSum)
+      tmp[o + 2] = Math.round(bSum)
+      tmp[o + 3] = Math.round(aSum)
+    }
+  }
+  // Vertical
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let rSum = 0
+      let gSum = 0
+      let bSum = 0
+      let aSum = 0
+      for (let k = -r; k <= r; k++) {
+        const yy = Math.min(h - 1, Math.max(0, y + k))
+        const wgt = kernel[k + r]!
+        const i = (yy * w + x) * 4
+        rSum += tmp[i]! * wgt
+        gSum += tmp[i + 1]! * wgt
+        bSum += tmp[i + 2]! * wgt
+        aSum += tmp[i + 3]! * wgt
+      }
+      const o = (y * w + x) * 4
+      data[o] = Math.round(rSum)
+      data[o + 1] = Math.round(gSum)
+      data[o + 2] = Math.round(bSum)
+      data[o + 3] = Math.round(aSum)
+    }
+  }
+}
+
 function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v))
 }

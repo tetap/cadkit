@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { applyFloydSteinbergRgba, applyThresholdRgba, applyBuiltinFilterCpu } from './filters.js'
+import {
+  applyFloydSteinbergRgba,
+  applyThresholdRgba,
+  applyBuiltinFilterCpu,
+  applyFilterStackRgba,
+} from './filters.js'
 
 describe('floyd / threshold', () => {
   it('threshold cpu single pixel', () => {
@@ -40,5 +45,16 @@ describe('floyd / threshold', () => {
     applyThresholdRgba(data, 2, 1, { cutoff: 0.5 })
     expect(data[0]).toBe(0)
     expect(data[4]).toBe(255)
+  })
+
+  it('applyFilterStackRgba runs invert then threshold', () => {
+    const data = new Uint8ClampedArray([0, 0, 0, 255, 255, 255, 255, 255])
+    applyFilterStackRgba(data, 2, 1, [
+      { id: 'a', type: 'invert', params: {} },
+      { id: 'b', type: 'threshold', params: { cutoff: 0.5 } },
+    ])
+    // black→white→white; white→black→black
+    expect(data[0]).toBe(255)
+    expect(data[4]).toBe(0)
   })
 })

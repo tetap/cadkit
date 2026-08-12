@@ -330,9 +330,9 @@ describe('exportGcode', () => {
     )
     expect(plan.cuts.length).toBeGreaterThan(0)
     expect(plan.cutLength).toBeGreaterThan(0)
-    // Dark row burns; white row is skipped in grayscale PWM.
-    expect(plan.cuts.every((c) => c.power > 0)).toBe(true)
+    // Dark row at full power; white row stays on the scanline at S0 (not travel).
     expect(plan.cuts.some((c) => c.power === 600)).toBe(true)
+    expect(plan.cuts.some((c) => c.power === 0)).toBe(true)
     const gcode = exportGcode(
       {
         entities: doc.getEntities(),
@@ -344,6 +344,7 @@ describe('exportGcode', () => {
     )
     expect(gcode).toContain('M3')
     expect(gcode).toMatch(/S600/)
+    expect(gcode).toMatch(/S0\b/)
     expect(gcode).toMatch(/G1 /)
   })
 })

@@ -232,11 +232,11 @@ export function buildToolpaths(
           end = pushPasses(ordered, gcode, layer, end, true)
           continue
         }
-        // Grayscale PWM: keep serpentine order; each segment has its own S.
+        // Grayscale PWM: serpentine order; S varies (0 = no burn, still G1 — not travel).
         const segs = rasterToPowerCuts(sample, { maxPower: gcode.power })
         for (let pass = 0; pass < gcode.passes; pass++) {
           for (const seg of segs) {
-            if (seg.points.length < 2 || seg.power <= 0) continue
+            if (seg.points.length < 2 || seg.power < 0) continue
             const length = pathLength(seg.points)
             if (length < 1e-9) continue
             cuts.push({
