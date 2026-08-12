@@ -257,7 +257,8 @@ describe('SceneProjector', () => {
 
     let item = scene.build(cam).items[0]!
     expect(item.fill).toBe('#2563eb')
-    expect(item.stroke).toBe('none')
+    // Fill mode keeps stroke so open paths / outlines stay visible.
+    expect(item.stroke).toBe('#111827')
 
     doc.updateLayer(layer.id, {
       gcode: { mode: 'line', lineSpacing: 0.1, fillStyle: 'bidirectional', power: 500, speed: 1000, passes: 1 },
