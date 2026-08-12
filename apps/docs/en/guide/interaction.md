@@ -28,6 +28,25 @@ editor.ungroup(groupId) // bake group matrix into children
 
 Nested group world translation converts the world delta into parent-local space. Removing a group snapshots the full subtree for undo.
 
+## Parametric handles (resident in object mode)
+
+With a single selection you can drag without entering path edit:
+
+- **Rect** — corner-radius handles  
+- **Star** — tip-count (✦, drag vertically) and corner fillet; anchored beside the silhouette  
+- **Arc text** — radius / center handles  
+
+## Snapping
+
+| Field | Meaning |
+|-------|---------|
+| `snapEnabled` | Endpoint / grid snap while drawing (with pink grid guides) |
+| `alignEnabled` | Drag AABB object align (best single guide) |
+| `angleStepDeg` | Rotation step (default 15°; Shift = 45°) |
+| `panDamping` | Pan inertia damping |
+
+Playground Settings can toggle object align / grid snap / angle snap independently.
+
 ## Style / filters
 
 ```ts
