@@ -87,7 +87,10 @@ describe('optimizeImportPaths', () => {
     }
     const input: Entity[] = [line(0, 0, 1, 0), circle, line(1, 0, 2, 0)]
     const { entities, stats } = optimizeImportPaths(input)
-    expect(stats.before).toBe(3)
+    // before/after count open paths only; circle is passthrough.
+    expect(stats.before).toBe(2)
+    expect(stats.after).toBe(1)
+    expect(entities).toHaveLength(2)
     expect(entities.some((e) => e.type === 'circle')).toBe(true)
     expect(entities.filter((e) => e.type === 'line' || e.type === 'polyline')).toHaveLength(1)
   })
