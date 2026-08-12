@@ -12,8 +12,8 @@ const editor = await createEditor(options)
 - `setInteraction(partial)` / `getInteraction()`
 - `setDisplayUnit` / `setGridVisible` / `setRulersVisible`
 - `setWorkAreaMode` / `setWorkAreaSize` / `getWorkArea`
-- `import.svg` / `import.dxf`
-- `export.svg` / `export.json`
+- `import.svg` / `import.dxf` / `import.gcode` / `import.image`
+- `export.svg` / `export.json` / `export.gcode`
 - `on(event, handler) => disposer`
 - `use(plugin)`
 - `getMetrics()` / `getCapabilities()` / `getWorkerAbi()`

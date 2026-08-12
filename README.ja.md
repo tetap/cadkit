@@ -1,141 +1,131 @@
-# CADKit
+<p align="center">
+  <h1 align="center">CADKit</h1>
+  <p align="center">
+    <a href="https://github.com/tetap/cadkit/stargazers"><img src="https://img.shields.io/github/stars/tetap/cadkit?style=flat&color=f5a623" alt="GitHub stars" /></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+    <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
+    <a href="https://gpuweb.github.io/gpuweb/"><img src="https://img.shields.io/badge/WebGPU-first-4141E2" alt="WebGPU-first" /></a>
+    <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white" alt="Node >= 20" /></a>
+  </p>
+  <p align="center">
+    <a href="./README.md">English</a> ·
+    <a href="./README.zh-CN.md">简体中文</a> ·
+    <a href="./README.ja.md"><b>日本語</b></a> ·
+    <a href="./README.ko.md">한국어</a>
+  </p>
+  <p align="center">
+    <b>Web で製品を届けるための CAD キャンバスフレームワーク。</b><br />
+    WebGPU 描画、Float64 ドキュメント、デザインツールに近い編集体験 — 必要なときに製造向け I/O。
+  </p>
+</p>
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | **日本語** | [한국어](./README.ko.md)
-
-Web 向けの**産業用 CAD 無限キャンバス・エディタフレームワーク** — WebGPU 描画、Float64 ドキュメントモデル、大規模エンティティ向けのモジュール型モノレポ。
-
-CADKit は、本番品質のインタラクション（選択・変形・スナップ・レイヤー）と、拡張可能なシーンパイプライン（空間インデックス、LOD、ダーティ更新）を組み合わせます。[LeaferJS](https://github.com/leaferjs/leafer-ui) の増分／ダーティ領域の考え方と、[Fabric.js](https://fabricjs.com/) の扱いやすいオブジェクト／ハンドル API から着想を得ています。
-
-> **ステータス：** 初期オープンソース（`v0.1`）。API は変更される可能性があります。コントリビュート歓迎です。
+<p align="center">
+  <a href="#クイックスタート"><b>クイックスタート →</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/tetap/cadkit/tree/main/apps/docs">Docs</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/tetap/cadkit/tree/main/apps/playground">Playground</a>
+</p>
 
 ---
 
-## CADKit を選ぶ理由
+## 機能ハイライト
 
-| | |
-|---|---|
-| **WebGPU 優先** | ベクトル＋画像パスを現代的 GPU 経路で処理（主レンダラは Canvas2D ではない） |
-| **CAD 級モデル** | Float64 権威ドキュメント、レイヤー、グループ、Undo / Redo |
-| **エディタ UX** | オブジェクトモード AABB 変形、Figma 風ルーラー／グリッド、整列・角度スナップ |
-| **製造向けフック** | レイヤー単位の GRBL / G-code 彫刻パラメータ（エクスポート向け。画面描画には未使用） |
-| **スケール目標** | チャンク読み込み、有界メモリ、百万エンティティ級ナビゲーション |
+### WebGPU 無限キャンバス
+
+ベクトルと画像を現代的な GPU パスで描画。主レンダラは Canvas2D ではありません。
+
+[Docs →](./apps/docs/guide/rendering.md)
+
+### CAD 級ドキュメント
+
+Float64 権威モデル、レイヤー、グループ、穴付き複合パス、信頼できる Undo / Redo。
+
+[Docs →](./apps/docs/guide/concepts.md)
+
+### 邪魔にならないエディタ UX
+
+オブジェクトモード変形、パラメトリック形状ハンドル（矩形 / 星）、弧テキスト、ルーラー、グリッド、整列・角度スナップ。
+
+[Docs →](./apps/docs/guide/interaction.md)
+
+### ブール・オフセット・パス編集
+
+和 / 差 / 積 / XOR、輪郭オフセット（グループ展開）、パス編集での頂点選択と削除。
+
+[Docs →](./apps/docs/guide/interaction.md)
+
+### 加工向けレイヤー
+
+線彫刻 / 塗り / 画像モード、パワー・速度・パス数、ハッチプレビュー、ドラッグ並べ替え。
+
+[Docs →](./apps/docs/guide/io.md)
+
+### あるものを入れ、切るものを出す
+
+SVG · DXF · G-code · ラスタ入力；SVG · JSON · G-code 出力。インポート時の線溶接、エクスポート時の空走最適化。
+
+[Docs →](./apps/docs/guide/io.md)
+
+**そのほか:**
+
+- **画像レイヤー** — ラスタは専用レイヤーへ。ベクトルと混在ドラッグしません。
+- **カーブテキスト** — 弧 / パステキストと常駐半径ハンドル。
+- **見えるスナップ** — 整列・グリッド・角度スナップにガイド表示。
+- **空間パイプライン** — R-tree / BVH、表示リストキャッシュ、LOD、増分 WebGPU。
+- **Playground** — 埋め込み前に試せるデスクトップ UI（zh-CN / en-US）。
+- **継続出荷** — 早期 API（`v0.1`）。[コミット履歴](https://github.com/tetap/cadkit/commits/main)が生きた変更ログです。
 
 ---
 
-## キャンバスのコア機能
+## スタック概要
 
-### 描画と編集
-- **ツール：** 選択 (V)、パン、直線、矩形、楕円、円、ポリライン、ペン（ベジェ）、ブラシ、テキスト、画像
-- **変形：** 拡大縮小／回転ハンドル、グループ化・解除、Undo / Redo
-- **テキスト：** 直線テキスト＋**円弧／カーブテキスト**（キャンバス上の半径ハンドル）
-- **ブール演算：** 和・差・積・排他的論理和（複数選択）
-- **オフセット：** 輪郭オフセットと結合スタイル。複数選択時は重なりをユニオン
-- **画像：** インポート、配置、任意のフィルタスタック
+TypeScript **モノレポ** — パッケージ単位でも、エディタファサードからでも始められます。
 
-### ドキュメントとレイヤー
-- 可視性・色付きマルチレイヤー
-- レイヤーの**ドラッグ並べ替え**、エンティティの**他レイヤーへのドロップ**
-- レイヤースタックが描画順を決定（パネル上部＝前面）
-- **レイヤー単位 GRBL パラメータ**（レイヤー選択時に右サイドバー）：
-  - 彫刻モード：**線彫刻** / **塗り彫刻**
-  - 塗り：線間隔＋スタイル — Bi-directional、Cross-Hatch、Fill Shapes Individually、Offset Fill
-  - パワー、速度、パス回数  
-  *（将来の G-code エクスポート用。キャンバス描画には影響しません。要素単体の機械パラメータはありません。）*
+| 層 | パッケージ |
+|----|------------|
+| **Public API** | `@cadkit/editor` · `@cadkit/types` |
+| **Model** | `@cadkit/document` · `@cadkit/commands` · `@cadkit/geometry` |
+| **View** | `@cadkit/scene` · `@cadkit/render-webgpu` · `@cadkit/guides` |
+| **Input** | `@cadkit/interaction` · `@cadkit/text` |
+| **I/O** | `@cadkit/io-svg` · `@cadkit/io-dxf` · `@cadkit/io-gcode` · `@cadkit/assets` |
 
-### ビューとガイド
-- ズーム／パン付き無限キャンバス（慣性あり）
-- ルーラー、主／副／中間グリッド、**ページ作業領域**モード
-- 整列スナップと角度スナップ
-- 選択ヒットモード（バウンディングボックス／幾何）
-
-### 相互運用
-- **インポート：** SVG、DXF（ストリーミング）、ラスター画像
-- **エクスポート：** SVG、JSON ドキュメント
-- ドキュメント単位（例：mm）、表示単位、インポート DPI
-
-### アーキテクチャ
-- パッケージ：`document` · `geometry` · `scene` · `interaction` · `render-webgpu` · `editor` · …
-- 空間インデックス（R-tree / BVH）、ディスプレイリストキャッシュ、LOD
-- Worker / WASM 拡張ポイント
+[LeaferJS](https://github.com/leaferjs/leafer-ui) の増分 / ダーティ領域と [Fabric.js](https://fabricjs.com/) の扱いやすいハンドル API に着想 — CAD 規模と製造フロー向けに再設計。
 
 ---
 
 ## クイックスタート
 
 ```bash
-# Node >= 20、pnpm 10+
+# Node >= 20, pnpm 10+
 pnpm install
 pnpm build
-pnpm playground:dev    # フルデスクトップエディタ
-pnpm docs:dev          # VitePress ドキュメント
+pnpm playground:dev
+pnpm docs:dev
 ```
 
-Playground で描画ツールとレイヤーパネルを試し、レイヤーを選ぶと右側で G-code パラメータを編集できます。
+```ts
+import { createEditor } from '@cadkit/editor'
 
----
-
-## リポジトリ構成
-
-```
-apps/
-  docs/          VitePress ドキュメント
-  playground/    フルエディタ（Dev メニュー：負荷／シード／ベンチ）
-packages/
-  types/         公開型と拡張点
-  geometry/      行列、境界、曲線、ブール、オフセット、テキストレイアウト
-  document/      Float64 権威モデル＋レイヤー（gcode 含む）
-  spatial/       R-tree / BVH
-  commands/      トランザクションと Undo/Redo
-  scene/         ドキュメント → キャッシュ可能な表示リスト
-  assets/        画像レジストリとフィルタ契約
-  render-core/   レンダラ抽象と予算
-  render-webgpu/ WebGPU バックエンド
-  interaction/   ツール、選択、スナップ、ハンドル、テキストオーバーレイ
-  text/          IME と shaping
-  guides/        グリッド／ルーラー幾何
-  io-svg/        SVG（image 含む）
-  io-dxf/        ストリーミング DXF
-  platform-web/  ブラウザ能力
-  worker-runtime/ Worker 通信
-  wasm/          WASM ABI プレースホルダ＋ JS フォールバック
-  editor/        公開ファサード（`createEditor`）
+const editor = await createEditor({ view: canvas, theme: 'light' })
+await editor.import.svg(svgText)
+await editor.import.dxf(dxfFile)
+await editor.import.gcode(gcodeText)
+const nc = editor.export.gcode()
 ```
 
 ---
 
-## パフォーマンス目標（v1 凍結）
+## 開発
 
-| シナリオ | 目標 |
-|----------|------|
-| 千万級エンティティ | チャンク読み込み、有界メモリ |
-| 約 100 万の単純可視エンティティ | ハイエンドで 60 FPS 目指す／iGPU で約 30 FPS |
-| ナビフレーム時間 | ハイエンド p95 ≤ 16.7 ms、iGPU ≤ 33 ms |
-| 純パン時 geometry upload | &lt; 1 KB/frame（`pan-reuse`） |
-| クリック応答 | p95 ≤ 100 ms |
-| 局所編集の初フレーム | ≤ 100 ms |
+```bash
+pnpm install && pnpm build && pnpm test
+```
 
-複雑なスプライン、塗り、大量テキストは、100 万同画面のフルディテールを保証しません。LOD と実ベンチが前提です。
-
----
-
-## Playground の UI 言語
-
-Playground シェルは現在 **zh-CN** と **en-US** の UI 文字列を提供します。  
-本リポジトリのドキュメントは**中・英・日・韓**に対応しています（先頭のリンク参照）。追加の UI ロケールは PR 歓迎です。
-
----
-
-## コントリビュート
-
-1. `pnpm install && pnpm build && pnpm test`
-2. 変更は焦点を絞り、既存の TypeScript／パッケージ境界に合わせる
-3. geometry / document / interaction の挙動にテストを追加・更新
-4. 要約とテスト計画付きで PR を作成
-
-Issue・機能提案は [github.com/tetap/cadkit](https://github.com/tetap/cadkit) へ。
+Issue / アイデア: [github.com/tetap/cadkit](https://github.com/tetap/cadkit)。
 
 ---
 
 ## ライセンス
 
-[MIT](./LICENSE)
+[MIT License](./LICENSE)

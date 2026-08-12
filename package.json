@@ -2,7 +2,7 @@
   "name": "cadkit",
   "private": true,
   "version": "0.1.0",
-  "description": "Industrial CAD canvas editor framework — WebGPU-only",
+  "description": "CAD canvas framework for the web — WebGPU, Float64 document, manufacturing I/O",
   "packageManager": "pnpm@10.20.0",
   "engines": {
     "node": ">=20"

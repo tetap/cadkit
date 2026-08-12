@@ -1,62 +1,96 @@
-# CADKit
+<p align="center">
+  <h1 align="center">CADKit</h1>
+  <p align="center">
+    <a href="https://github.com/tetap/cadkit/stargazers"><img src="https://img.shields.io/github/stars/tetap/cadkit?style=flat&color=f5a623" alt="GitHub stars" /></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+    <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
+    <a href="https://gpuweb.github.io/gpuweb/"><img src="https://img.shields.io/badge/WebGPU-first-4141E2" alt="WebGPU-first" /></a>
+    <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white" alt="Node >= 20" /></a>
+  </p>
+  <p align="center">
+    <a href="./README.md"><b>English</b></a> ·
+    <a href="./README.zh-CN.md">简体中文</a> ·
+    <a href="./README.ja.md">日本語</a> ·
+    <a href="./README.ko.md">한국어</a>
+  </p>
+  <p align="center">
+    <b>The CAD canvas framework for makers who ship on the web.</b><br />
+    WebGPU rendering, a Float64 document model, and editor UX that feels like a design tool — with manufacturing I/O when you need it.
+  </p>
+</p>
 
-**English** | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md)
-
-Industrial **CAD infinite-canvas editor framework** for the web — WebGPU rendering, Float64 document model, and a modular monorepo built for high entity counts.
-
-CADKit combines a production-oriented interaction model (selection, transforms, snaps, layers) with a scalable scene pipeline (spatial index, LOD, dirty updates). Inspired by incremental / dirty-region ideas from [LeaferJS](https://github.com/leaferjs/leafer-ui) and the approachable object/handle APIs of [Fabric.js](https://fabricjs.com/).
-
-> **Status:** early open source (`v0.1`). APIs may evolve. Contributions and feedback welcome.
+<p align="center">
+  <a href="#quick-start"><b>Quick start →</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/tetap/cadkit/tree/main/apps/docs">Docs</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/tetap/cadkit/tree/main/apps/playground">Playground</a>
+</p>
 
 ---
 
-## Why CADKit?
+## Features
 
-| | |
-|---|---|
-| **WebGPU-first** | Vector + image passes on a modern GPU path (no Canvas2D fallback as the primary renderer) |
-| **CAD-grade model** | Float64 authority document, layers, groups, undo/redo |
-| **Editor UX** | Object-mode AABB transforms, Figma-like rulers/grid, align & angle snap |
-| **Manufacturing-ready hooks** | Per-layer GRBL / G-code engrave parameters (export-oriented; not used for screen paint) |
-| **Scale targets** | Chunked loading, bounded memory, million-entity navigation goals |
+### WebGPU Infinite Canvas
+
+Vector and image passes on a modern GPU path — pan, zoom, and edit without a Canvas2D primary renderer.
+
+[Docs →](./apps/docs/guide/rendering.md)
+
+### CAD-grade Document
+
+Float64 authority model, layers, groups, compound paths with holes, and undo / redo you can trust.
+
+[Docs →](./apps/docs/guide/concepts.md)
+
+### Editor UX That Gets Out of the Way
+
+Object-mode transforms, parametric shape handles (rect / star), arc text, rulers, grid, align & angle snap.
+
+[Docs →](./apps/docs/guide/interaction.md)
+
+### Boolean, Offset & Path Edit
+
+Union / subtract / intersect / exclude; contour offset (including groups); vertex select & delete in path edit mode.
+
+[Docs →](./apps/docs/guide/interaction.md)
+
+### Layers Built for Fabrication
+
+Per-layer line / fill / image modes, GRBL-oriented power · speed · passes, hatch preview, and drag-to-reorder stack.
+
+[Docs →](./apps/docs/guide/io.md)
+
+### Import What You Have, Export What You Cut
+
+SVG · DXF · G-code · raster images in; SVG · JSON · G-code out — with path welding and travel optimization on import / export.
+
+[Docs →](./apps/docs/guide/io.md)
+
+**Also in the box:**
+
+- **Image layers** — Imported rasters land on dedicated image layers; vector and image stacks stay isolated.
+- **Curve text** — Arc / path text with on-canvas radius handles, same resident style as shape params.
+- **Snaps with feedback** — Object align, grid, and angle snap with visible guides (not silent magnetic pulls).
+- **Spatial pipeline** — R-tree / BVH, display-list cache, LOD, incremental WebGPU updates.
+- **Playground shell** — Full desktop editor UI (zh-CN / en-US) to try the stack before you embed it.
+- **And more** — APIs are early (`v0.1`); the [commit history](https://github.com/tetap/cadkit/commits/main) is the living changelog.
 
 ---
 
-## Core canvas features
+## Stack at a glance
 
-### Drawing & editing
-- **Tools:** Select (V), Pan, Line, Rectangle, Ellipse, Circle, Polyline, Pen (Bezier), Brush, Text, Image
-- **Transforms:** Scale / rotate handles, group & ungroup, undo / redo
-- **Text:** Straight text + **arc / curve text** with on-canvas radius handles
-- **Boolean ops:** Union, subtract, intersect, exclude (multi-select)
-- **Offset:** Contour offset with join styles; multi-select unions overlapping results
-- **Images:** Import, place, optional filter stack
+Works as a **TypeScript monorepo** — pick packages, or start from the editor facade.
 
-### Document & layers
-- Multi-layer document with visibility & color
-- **Drag to reorder** layers; **drag entities** onto another layer
-- Layer stack drives draw order (panel top = front)
-- **Per-layer GRBL params** (right sidebar when a layer is selected):
-  - Engrave mode: **line** or **fill**
-  - Fill: line spacing + styles — Bi-directional, Cross-Hatch, Fill Shapes Individually, Offset Fill
-  - Power, speed, passes  
-  *(Stored for future G-code export; does not affect canvas rendering. Entities do not have individual machine params.)*
+| Layer | Packages |
+|-------|----------|
+| **Public API** | `@cadkit/editor` · `@cadkit/types` |
+| **Model** | `@cadkit/document` · `@cadkit/commands` · `@cadkit/geometry` |
+| **View** | `@cadkit/scene` · `@cadkit/render-webgpu` · `@cadkit/guides` |
+| **Input** | `@cadkit/interaction` · `@cadkit/text` |
+| **I/O** | `@cadkit/io-svg` · `@cadkit/io-dxf` · `@cadkit/io-gcode` · `@cadkit/assets` |
 
-### View & guides
-- Infinite canvas with zoom / pan (incl. inertia)
-- Rulers, major/minor/mid grid, **page work area** mode
-- Align snap & angle snap
-- Selection hit modes (bounds / geometry)
-
-### Interoperability
-- **Import:** SVG, DXF (streaming), raster images
-- **Export:** SVG, JSON document
-- Document units (e.g. mm) with display unit & DPI import settings
-
-### Architecture highlights
-- Monorepo packages: `document` · `geometry` · `scene` · `interaction` · `render-webgpu` · `editor` · …
-- Spatial index (R-tree / BVH), display-list caching, LOD
-- Worker / WASM hooks for heavy compute (extensible)
+Inspired by incremental / dirty-region ideas from [LeaferJS](https://github.com/leaferjs/leafer-ui) and approachable object / handle APIs from [Fabric.js](https://fabricjs.com/) — purpose-built for CAD scale and manufacturing workflows.
 
 ---
 
@@ -66,11 +100,21 @@ CADKit combines a production-oriented interaction model (selection, transforms, 
 # Node >= 20, pnpm 10+
 pnpm install
 pnpm build
-pnpm playground:dev    # full desktop editor playground
+pnpm playground:dev    # full desktop editor
 pnpm docs:dev          # VitePress docs
 ```
 
-Open the playground, try drawing tools, layers dock, and the right-side layer G-code form after selecting a layer.
+```ts
+import { createEditor } from '@cadkit/editor'
+
+const editor = await createEditor({ view: canvas, theme: 'light' })
+await editor.import.svg(svgText)
+await editor.import.dxf(dxfFile)
+await editor.import.gcode(gcodeText)
+const nc = editor.export.gcode()
+```
+
+Open the playground, draw a star, tweak tip / corner handles, assign a layer’s fill angle, then export G-code.
 
 ---
 
@@ -79,63 +123,50 @@ Open the playground, try drawing tools, layers dock, and the right-side layer G-
 ```
 apps/
   docs/          VitePress documentation
-  playground/    Full desktop editor (Dev menu: stress / seed / benchmarks)
+  playground/    Full desktop editor (Dev: stress / seed / benches)
 packages/
-  types/         Public types & extension points
-  geometry/      Matrices, bounds, curves, boolean, offset, text layout
-  document/      Float64 authority model + layers (+ gcode params)
-  spatial/       R-tree / BVH
-  commands/      Transactions & undo/redo (incl. group/ungroup)
-  scene/         Document → cacheable display list
-  assets/        Image registry & filter contracts
-  render-core/   Renderer abstraction & budgets
-  render-webgpu/ WebGPU backend (vectors + images)
-  interaction/   Tools, selection, snaps, handles, text overlay
-  text/          IME + shaping helpers
-  guides/        Grid / rulers geometry
-  io-svg/        SVG (incl. image)
-  io-dxf/        Streaming DXF
-  platform-web/  Browser capabilities
-  worker-runtime/ Worker messaging
-  wasm/          WASM ABI placeholder + JS fallback
   editor/        Public facade (`createEditor`)
+  document/      Float64 model + layers (+ gcode / image modes)
+  geometry/      Matrices, curves, boolean, offset, shapes, import weld
+  interaction/   Tools, selection, snaps, handles, text overlay
+  scene/         Document → cacheable display list
+  render-webgpu/ WebGPU vectors + images
+  io-svg/        SVG import / export
+  io-dxf/        Streaming DXF
+  io-gcode/      G-code import / export + hatch + path order
+  …              types, spatial, commands, assets, text, guides, wasm
 ```
 
 ---
 
-## Performance targets (v1 freeze)
+## Performance targets (v1)
 
 | Scenario | Target |
 |----------|--------|
 | Tens of millions of entities | Chunked load, bounded memory |
-| ~1M simple visible entities | Aim 60 FPS on high-end desktop; ~30 FPS on iGPU |
-| Navigation frame time | High-end p95 ≤ 16.7 ms; iGPU ≤ 33 ms |
+| ~1M simple visible entities | ~60 FPS high-end · ~30 FPS iGPU |
+| Navigation frame time | p95 ≤ 16.7 ms (high-end) · ≤ 33 ms (iGPU) |
 | Pure pan geometry upload | &lt; 1 KB/frame (`pan-reuse`) |
-| Click feedback | p95 ≤ 100 ms |
-| Local edit first frame | ≤ 100 ms |
+| Click / local-edit feedback | p95 ≤ 100 ms |
 
-Dense splines, fills, and massive text are not promised at full detail for 1M on-screen entities — LOD and real benchmarks apply.
-
----
-
-## Playground UI locale
-
-The playground shell currently ships **zh-CN** and **en-US** UI strings.  
-This repository documents the project in **Chinese, English, Japanese, and Korean** (see links at the top). Additional UI locales are welcome via PR.
+Dense splines, fills, and massive text are not promised at full detail for 1M on-screen entities — LOD and real benches apply.
 
 ---
 
-## Contributing
+## Developing
 
-1. `pnpm install && pnpm build && pnpm test`
-2. Keep changes focused; match existing TypeScript / package boundaries
-3. Add or update tests for geometry, document, and interaction behavior
-4. Open a PR with a clear summary and test plan
+```bash
+pnpm install && pnpm build && pnpm test
+```
 
-Issues and feature proposals are welcome at [github.com/tetap/cadkit](https://github.com/tetap/cadkit).
+1. Keep changes focused; respect package boundaries  
+2. Add or update tests for geometry, document, and interaction  
+3. Open a PR with a clear summary and test plan  
+
+Issues and ideas: [github.com/tetap/cadkit](https://github.com/tetap/cadkit).
 
 ---
 
 ## License
 
-[MIT](./LICENSE)
+CADKit is free and open source under the [MIT License](./LICENSE).

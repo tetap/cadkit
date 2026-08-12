@@ -2,22 +2,22 @@
 layout: home
 hero:
   name: CADKit
-  text: Industrial CAD Infinite Canvas
-  tagline: WebGPU-first · Float64 authority model · Leafer-class performance · Fabric-like DX
+  text: The CAD canvas framework for the web
+  tagline: WebGPU rendering · Float64 document · design-tool UX · manufacturing I/O
   actions:
     - theme: brand
-      text: Getting Started
+      text: Get started
       link: /en/guide/getting-started
     - theme: alt
-      text: Architecture
-      link: /en/guide/architecture
+      text: Import / Export
+      link: /en/guide/io
 features:
-  - title: Tens of millions of entities
-    details: Chunked out-of-core storage, bounded memory, Worker/WASM parse & tessellation
-  - title: Million simple visibles
-    details: Flat display list, GPU batching, LOD and spatial indexing
-  - title: Fabric-style facade
-    details: createEditor / add / select / group / import.dxf, handles and event disposers
-  - title: Interaction & snapping
-    details: AABB frame hit-testing, group matrix transforms, align/angle snap, pan inertia
+  - title: WebGPU infinite canvas
+    details: Vector + image passes on a modern GPU path — not Canvas2D as the primary renderer
+  - title: CAD-grade document
+    details: Float64 authority model, layers, groups, compound holes, trustworthy undo/redo
+  - title: Manufacturing I/O
+    details: SVG / DXF / G-code / images; per-layer line·fill·power·speed; travel optimization
+  - title: Editor UX that gets out of the way
+    details: Parametric handles, arc text, boolean / offset, visible align & grid snaps
 ---
