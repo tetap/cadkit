@@ -28,7 +28,16 @@ describe('shapes', () => {
 
   it('buildHeartPath / buildStarPath are closed polylines', () => {
     const heart = buildHeartPath(0, 0, 40, 40)
-    expect(heart.length).toBeGreaterThan(20)
+    expect(heart.length).toBeGreaterThan(16)
+    const xs = heart.map((p) => p.x)
+    const ys = heart.map((p) => p.y)
+    expect(Math.min(...xs)).toBeCloseTo(0, 5)
+    expect(Math.max(...xs)).toBeCloseTo(40, 5)
+    expect(Math.min(...ys)).toBeCloseTo(0, 5)
+    expect(Math.max(...ys)).toBeCloseTo(40, 5)
+    // SVG heart: bottom tip is the unique max-Y vertex, centered.
+    const tip = heart.reduce((a, p) => (p.y > a.y ? p : a))
+    expect(tip.x).toBeCloseTo(20, 1)
     const star = buildStarPath(0, 0, 20, 5)
     expect(star.length).toBe(10)
     const filleted = buildStarPath(0, 0, 20, 5, 0.4, 2)

@@ -59,6 +59,11 @@ export interface RenderItem {
   fill?: string
   /** Flattened geometry in world space (Float64) */
   coords: Float64Array
+  /**
+   * Hole rings for filled closed polylines (flat `[x,y,...]`, typically closed).
+   * Used by earcut so glyph counters / compound paths stay hollow.
+   */
+  holes?: Float64Array[]
   bounds: AABB
   lod: number
   /** For GPU instance / picking */
@@ -448,7 +453,6 @@ export class SceneProjector {
     const paint = this.resolveEntityPaint(entity)
     const styleKey = `${paint.stroke}|${paint.strokeWidth}|${paint.fill ?? ''}|${entity.layerId}`
     const pickId = this.pickIds.get(entity.id) ?? 0
-    const hasHoles = entity.type === 'polyline' && !!entity.holes?.length
     const base = {
       id: entity.id,
       // Panel top (index 0) draws in front — see getStackOrder().
@@ -456,8 +460,7 @@ export class SceneProjector {
       styleKey,
       stroke: paint.stroke,
       strokeWidth: paint.strokeWidth,
-      // Holes need even-odd fill; until then stroke-only for compound paths.
-      fill: hasHoles ? undefined : paint.fill,
+      fill: paint.fill,
       bounds,
       lod,
       pickId,
@@ -512,20 +515,24 @@ export class SceneProjector {
             return [{ ...base, kind: 'instance', coords: inst }]
           }
         }
+        const holeRings = (entity.holes ?? [])
+          .filter((h) => h.length >= 2)
+          .map((h) => packRing(h, true))
         const items: RenderItem[] = [
           {
             ...base,
             kind: 'polyline',
             coords: packRing(entity.points, entity.closed && entity.points.length >= 2),
+            ...(holeRings.length ? { holes: holeRings } : {}),
           },
         ]
-        for (const hole of entity.holes ?? []) {
-          if (hole.length < 2) continue
+        // Hole rings still need their own stroke (fill stays on the outer only).
+        for (const holeCoords of holeRings) {
           items.push({
             ...base,
             kind: 'polyline',
             fill: undefined,
-            coords: packRing(hole, true),
+            coords: holeCoords,
           })
         }
         return items
@@ -633,37 +640,61 @@ export class SceneProjector {
         if (aabbWidth(bounds) / worldPerPixel < 4 || aabbHeight(bounds) / worldPerPixel < 4) {
           return []
         }
-        // Vector glyph outlines → closed polylines (same hairline stroke / fill
-        // path as other geometry). Empty while canvas/fonts unavailable.
+        // Vector glyph outlines → closed polylines. Nest counters into outers so
+        // earcut can hollow them (centroid-fan used to spill across concave CJK).
         const outlines = textEntityToLocalOutlines(entity)
         if (!outlines.length) return []
-        const items: RenderItem[] = []
+        type Ring = { coords: Float64Array; area: number; sampleX: number; sampleY: number }
+        const rings: Ring[] = []
         for (const contour of outlines) {
           const pts = contour.points
-          if (pts.length < 2) continue
-          let area = 0
-          for (let i = 0, n = pts.length; i < n; i++) {
-            const p = pts[i]!
-            const q = pts[(i + 1) % n]!
-            area += p.x * q.y - q.x * p.y
+          if (pts.length < 3) continue
+          const coords = packRing(pts, true)
+          const area = signedAreaFlat(coords)
+          rings.push({
+            coords,
+            area,
+            sampleX: coords[0]!,
+            sampleY: coords[1]!,
+          })
+        }
+        const outers = rings.filter((r) => r.area >= 0)
+        const holeRings = rings.filter((r) => r.area < 0)
+        const holesByOuter = new Map<number, Float64Array[]>()
+        for (const hole of holeRings) {
+          let best = -1
+          let bestAbs = Infinity
+          for (let i = 0; i < outers.length; i++) {
+            const outer = outers[i]!
+            const abs = Math.abs(outer.area)
+            if (abs < Math.abs(hole.area) || abs >= bestAbs) continue
+            if (!pointInFlatPoly(hole.sampleX, hole.sampleY, outer.coords)) continue
+            best = i
+            bestAbs = abs
           }
-          // Holes (negative area): stroke-only until even-odd fill exists.
-          const isHole = area < 0
-          const n = pts.length
-          const coords = new Float64Array((n + 1) * 2)
-          for (let i = 0; i < n; i++) {
-            const q = wp(pts[i]!.x, pts[i]!.y)
-            coords[i * 2] = q.x
-            coords[i * 2 + 1] = q.y
-          }
-          const q0 = wp(pts[0]!.x, pts[0]!.y)
-          coords[n * 2] = q0.x
-          coords[n * 2 + 1] = q0.y
+          if (best < 0) continue
+          const list = holesByOuter.get(best) ?? []
+          list.push(hole.coords)
+          holesByOuter.set(best, list)
+        }
+        const items: RenderItem[] = []
+        for (let i = 0; i < outers.length; i++) {
+          const outer = outers[i]!
+          const nested = holesByOuter.get(i)
           items.push({
             ...base,
             kind: 'polyline',
-            fill: isHole ? undefined : paint.fill,
-            coords,
+            fill: paint.fill,
+            coords: outer.coords,
+            ...(nested?.length ? { holes: nested } : {}),
+          })
+        }
+        for (const hole of holeRings) {
+          items.push({
+            ...base,
+            kind: 'polyline',
+            fill: undefined,
+            coords: hole.coords,
           })
         }
         return items
@@ -688,4 +719,39 @@ export class SceneProjector {
         return []
     }
   }
+}
+
+function uniqueFlatCount(coords: ArrayLike<number>): number {
+  let n = Math.floor(coords.length / 2)
+  if (n >= 2) {
+    const dx = coords[0]! - coords[(n - 1) * 2]!
+    const dy = coords[1]! - coords[(n - 1) * 2 + 1]!
+    if (dx * dx + dy * dy < 1e-12) n -= 1
+  }
+  return n
+}
+
+function signedAreaFlat(coords: ArrayLike<number>): number {
+  const n = uniqueFlatCount(coords)
+  let a = 0
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n
+    a += coords[i * 2]! * coords[j * 2 + 1]! - coords[j * 2]! * coords[i * 2 + 1]!
+  }
+  return a / 2
+}
+
+function pointInFlatPoly(x: number, y: number, coords: ArrayLike<number>): boolean {
+  const n = uniqueFlatCount(coords)
+  let inside = false
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = coords[i * 2]!
+    const yi = coords[i * 2 + 1]!
+    const xj = coords[j * 2]!
+    const yj = coords[j * 2 + 1]!
+    const intersect =
+      yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-30) + xi
+    if (intersect) inside = !inside
+  }
+  return inside
 }

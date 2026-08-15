@@ -15,6 +15,10 @@ export interface HotProps {
   entityType: string | null
   /** TextEntity has arc path. */
   arcText: boolean
+  /** Parametric polyline (`rect` / `star` / `heart`). */
+  shapeKind: 'rect' | 'star' | 'heart' | null
+  /** Uniform corner radius for rect / star fillet. */
+  cornerRadius: number
 }
 
 export interface MetricsSnapshot {
@@ -73,6 +77,8 @@ export const DEFAULT_HOT: HotProps = {
   fontSize: 16,
   entityType: null,
   arcText: false,
+  shapeKind: null,
+  cornerRadius: 0,
 }
 
 export function createAppStore(initial?: Partial<AppState>): AppStore {

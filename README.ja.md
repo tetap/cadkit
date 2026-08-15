@@ -5,7 +5,8 @@
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
     <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
     <a href="https://gpuweb.github.io/gpuweb/"><img src="https://img.shields.io/badge/WebGPU-first-4141E2" alt="WebGPU-first" /></a>
-    <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white" alt="Node >= 20" /></a>
+    <img src="https://img.shields.io/badge/laser-engraving-22c55e" alt="Laser engraving" />
+    <img src="https://img.shields.io/badge/pen-plotter-3b82f6" alt="Pen plotter" />
   </p>
   <p align="center">
     <a href="./README.md">English</a> ·
@@ -14,20 +15,57 @@
     <a href="./README.ko.md">한국어</a>
   </p>
   <p align="center">
-    <b>Web で製品を届けるための CAD キャンバスフレームワーク。</b><br />
-    WebGPU 描画、Float64 ドキュメント、デザインツールに近い編集体験 — 必要なときに製造向け I/O。
+    <b>レーザー彫刻とペンプロッターのための Web ソフトウェア。</b><br />
+    CAD キャンバスで描き、レイヤーごとにパワー・速度・パス数を設定し、GRBL G-code を書き出す。ブラウザで設計から加工まで。
   </p>
 </p>
 
 <p align="center">
-  <a href="https://tetap.github.io/cadkit/"><b>ライブデモ →</b></a>
+  <a href="https://tetap.github.io/cadkit/">
+    <img src="./docs/images/playground-en.png" alt="CADKit Playground" width="920" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://tetap.github.io/cadkit/"><b>ライブ Playground →</b></a>
   &nbsp;·&nbsp;
   <a href="#クイックスタート">クイックスタート</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/tetap/cadkit/tree/main/apps/docs">Docs</a>
-  &nbsp;·&nbsp;
-  <a href="https://github.com/tetap/cadkit/tree/main/apps/playground">Playground</a>
 </p>
+
+---
+
+## なぜ CADKit か
+
+多くの Web キャンバスは「描く」で終わります。CADKit は **ダイオード / GRBL レーザー** と **ペンプロッター** 向けです。編集しているドキュメントが、そのまま切る・彫る・書くジョブになります。
+
+| 強み | 内容 |
+|------|------|
+| **加工向けレイヤー** | 線彫刻、塗り（双方向 / クロスハッチ）、画像スキャン。パワー・速度・パス数はレイヤー単位 |
+| **写真彫刻** | グレースケール PWM、しきい値、Floyd → G-code の `S` |
+| **プロッター向けパス** | 空走最適化、線の溶接、少ないジャンプの一筆書き |
+| **本物の円弧** | 円とフィット曲線は **G2 / G3**。G1 の折れ線だらけにしない |
+| **デザインツール級 UX** | ペン、角丸、ブール、オフセット、弧テキスト、見えるスナップ |
+| **WebGPU + Float64** | GPU キャンバスと CAD 精度。主レンダラは Canvas2D ではない |
+| **ブラウザで完結** | インストール不要。`@cadkit/editor` を埋め込むか Playground を使う |
+
+---
+
+## ソフトウェア設計
+
+**キャンバス → レイヤー加工パラメータ → GRBL 出力** の一本道。
+
+<p align="center">
+  <img src="./docs/images/design-en.png" alt="CADKit software design" width="920" />
+</p>
+
+- **線** — 輪郭の彫刻 / 切断 / ペンストローク  
+- **塗り** — 双方向またはクロスハッチ、角度指定  
+- **画像** — ラスタスキャン。透明部分だけ空走  
+- **書き出し** — 経路順最適化、`M3` / `M5`、G0、G1 / G2 / G3  
+
+[I/O ガイド →](./apps/docs/guide/io.md)
 
 ---
 
@@ -47,7 +85,7 @@ Float64 権威モデル、レイヤー、グループ、穴付き複合パス、
 
 ### 邪魔にならないエディタ UX
 
-オブジェクトモード変形、パラメトリック形状ハンドル（矩形 / 星）、弧テキスト、ルーラー、グリッド、整列・角度スナップ。
+オブジェクトモード変形、パラメトリックハンドル（矩形 / 星 / 角丸）、弧テキスト、ルーラー、グリッド、整列・角度スナップ。
 
 [Docs →](./apps/docs/guide/interaction.md)
 
@@ -55,19 +93,13 @@ Float64 権威モデル、レイヤー、グループ、穴付き複合パス、
 
 和 / 差 / 積 / XOR、輪郭オフセット（グループ展開）、パス編集での頂点選択と削除。
 
-[Docs →](./apps/docs/guide/interaction.md)
-
 ### 加工向けレイヤー
 
 線彫刻 / 塗り / 画像モード、パワー・速度・パス数、ハッチプレビュー、ドラッグ並べ替え。
 
-[Docs →](./apps/docs/guide/io.md)
-
 ### あるものを入れ、切るものを出す
 
 SVG · DXF · G-code · ラスタ入力；SVG · JSON · G-code 出力。インポート時の線溶接、エクスポート時の空走最適化。
-
-[Docs →](./apps/docs/guide/io.md)
 
 **そのほか:**
 
@@ -92,7 +124,7 @@ TypeScript **モノレポ** — パッケージ単位でも、エディタファ
 | **Input** | `@cadkit/interaction` · `@cadkit/text` |
 | **I/O** | `@cadkit/io-svg` · `@cadkit/io-dxf` · `@cadkit/io-gcode` · `@cadkit/assets` |
 
-[LeaferJS](https://github.com/leaferjs/leafer-ui) の増分 / ダーティ領域と [Fabric.js](https://fabricjs.com/) の扱いやすいハンドル API に着想 — CAD 規模と製造フロー向けに再設計。
+[LeaferJS](https://github.com/leaferjs/leafer-ui) の増分 / ダーティ領域と [Fabric.js](https://fabricjs.com/) の扱いやすいハンドル API に着想 — レーザー、プロッター、CAD 規模向けに再設計。
 
 ---
 
@@ -115,6 +147,8 @@ await editor.import.dxf(dxfFile)
 await editor.import.gcode(gcodeText)
 const nc = await editor.export.gcode()
 ```
+
+[Playground](https://tetap.github.io/cadkit/) を開き、パスを描いてレイヤーを線 / 塗りに設定し、レーザーまたはプロッター用 G-code を書き出してください。
 
 ---
 

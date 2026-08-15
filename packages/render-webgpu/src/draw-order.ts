@@ -1,6 +1,7 @@
 import type { RenderItem } from '@cadkit/scene'
 import { isPaintVisible, parseColor } from './color.js'
-import { isClosedRing } from './fill-pack.js'
+import { appendTriangulatedFill, isClosedRing } from './fill-pack.js'
+import { estimateTriangleCount } from './triangulate.js'
 
 /**
  * Painter ops in document stack order (back → front).
@@ -46,9 +47,7 @@ export function packDrawOrder(
       continue
     }
     if (isPaintVisible(item.fill) && isClosedRing(item.kind, item.coords)) {
-      const n = uniqueRingCount(item.coords)
-      // Centroid fan: one triangle per edge (works for star-shaped concave rings).
-      if (n >= 3) fillTris += n
+      fillTris += estimateTriangleCount(item.coords, item.holes)
     }
     if (isPaintVisible(item.stroke)) {
       if (item.kind === 'line') strokeSegs += 1
@@ -133,7 +132,7 @@ export function packDrawOrder(
 
     if (isPaintVisible(item.fill) && isClosedRing(item.kind, item.coords)) {
       const before = fillO
-      fillO = appendFillFan(fillData, fillO, item)
+      fillO = appendTriangulatedFill(fillData, fillO, item)
       pushFill((fillO - before) / 6)
     }
 
@@ -182,47 +181,6 @@ function appendRectFill(
   return o
 }
 
-function appendFillFan(data: Float32Array, o: number, item: RenderItem): number {
-  const [r, g, b, a] = parseColor(item.fill!)
-  const c = item.coords
-  const n = uniqueRingCount(c)
-  if (n < 3) return o
-  let cx = 0
-  let cy = 0
-  for (let i = 0; i < n; i++) {
-    cx += c[i * 2]!
-    cy += c[i * 2 + 1]!
-  }
-  cx /= n
-  cy /= n
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n
-    const x1 = c[i * 2]!
-    const y1 = c[i * 2 + 1]!
-    const x2 = c[j * 2]!
-    const y2 = c[j * 2 + 1]!
-    data[o++] = cx
-    data[o++] = cy
-    data[o++] = r
-    data[o++] = g
-    data[o++] = b
-    data[o++] = a
-    data[o++] = x1
-    data[o++] = y1
-    data[o++] = r
-    data[o++] = g
-    data[o++] = b
-    data[o++] = a
-    data[o++] = x2
-    data[o++] = y2
-    data[o++] = r
-    data[o++] = g
-    data[o++] = b
-    data[o++] = a
-  }
-  return o
-}
-
 function appendStroke(data: Float32Array, o: number, item: RenderItem): number {
   const [r, g, b, a] = parseColor(item.stroke)
   const c = item.coords
@@ -256,14 +214,4 @@ function appendStroke(data: Float32Array, o: number, item: RenderItem): number {
     data[o++] = a
   }
   return o
-}
-
-function uniqueRingCount(coords: ArrayLike<number>): number {
-  let n = Math.floor(coords.length / 2)
-  if (n >= 2) {
-    const dx = coords[0]! - coords[(n - 1) * 2]!
-    const dy = coords[1]! - coords[(n - 1) * 2 + 1]!
-    if (dx * dx + dy * dy < 1e-12) n -= 1
-  }
-  return n
 }

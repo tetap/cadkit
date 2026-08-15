@@ -209,20 +209,56 @@ export function tessellateRoundedRect(
   return dedupePoints(out)
 }
 
-/** Classic heart curve mapped into the given AABB. */
-export function buildHeartPath(minX: number, minY: number, maxX: number, maxY: number, samples = 64): Vec2[] {
+/**
+ * Heart from a classic SVG (two cubic lobes + a V), tessellated to a polyline
+ * and fitted into the given AABB. Design space matches:
+ *   M cleft  c…  c…  L tip  L  c…  C cleft z
+ */
+export function buildHeartPath(minX: number, minY: number, maxX: number, maxY: number, samples = 8): Vec2[] {
   const w = maxX - minX
   const h = maxY - minY
   if (w < 1e-9 || h < 1e-9) return []
-  const n = Math.max(24, samples)
-  // Parametric heart in unit space, then fit to box.
+  const steps = Math.max(4, Math.round(samples))
+  // Source path units (Y-down). R = lobe span; k = cubic handle inset.
+  const R = 80.176
+  const k = 22.14
+  const cx = 276.337
+  const cy = 277.638
+  const cleft = { x: cx, y: cy }
+  const left = { x: cx - R, y: cy }
+  const leftLow = { x: cx - R, y: cy + R }
+  const tip = { x: cx, y: cy + 2 * R }
+  const rightLow = { x: cx + R, y: cy + R }
+  const right = { x: cx + R, y: cy }
+
   const raw: Vec2[] = []
-  for (let i = 0; i < n; i++) {
-    const t = (i / n) * Math.PI * 2
-    const x = 16 * Math.sin(t) ** 3
-    const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t))
-    raw.push({ x, y })
+  const append = (pts: Vec2[], skipFirst: boolean) => {
+    for (let i = skipFirst ? 1 : 0; i < pts.length; i++) raw.push(pts[i]!)
   }
+  append(
+    sampleCubic(cleft, { x: cx - k, y: cy - k }, { x: cx - (R - k), y: cy - k }, left, steps),
+    false,
+  )
+  append(
+    sampleCubic(left, { x: cx - R - k, y: cy + k }, { x: cx - R - k, y: cy + R - k }, leftLow, steps),
+    true,
+  )
+  raw.push(tip, rightLow)
+  append(
+    sampleCubic(
+      rightLow,
+      { x: cx + R + k, y: cy + R - k },
+      { x: cx + R + k, y: cy + k },
+      right,
+      steps,
+    ),
+    true,
+  )
+  append(
+    sampleCubic(right, { x: cx + R - k, y: cy - k }, { x: cx + k, y: cy - k }, cleft, steps),
+    true,
+  )
+
   let rMinX = Infinity
   let rMinY = Infinity
   let rMaxX = -Infinity
@@ -239,6 +275,25 @@ export function buildHeartPath(minX: number, minY: number, maxX: number, maxY: n
     x: minX + ((p.x - rMinX) / rw) * w,
     y: minY + ((p.y - rMinY) / rh) * h,
   }))
+}
+
+function sampleCubic(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, steps: number): Vec2[] {
+  const out: Vec2[] = []
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps
+    const u = 1 - t
+    const uu = u * u
+    const tt = t * t
+    const a = uu * u
+    const b = 3 * uu * t
+    const c = 3 * u * tt
+    const d = tt * t
+    out.push({
+      x: a * p0.x + b * p1.x + c * p2.x + d * p3.x,
+      y: a * p0.y + b * p1.y + c * p2.y + d * p3.y,
+    })
+  }
+  return out
 }
 
 /** Vertex centroid — more stable than AABB center for point-up stars. */

@@ -5,7 +5,8 @@
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
     <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" /></a>
     <a href="https://gpuweb.github.io/gpuweb/"><img src="https://img.shields.io/badge/WebGPU-first-4141E2" alt="WebGPU-first" /></a>
-    <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white" alt="Node >= 20" /></a>
+    <img src="https://img.shields.io/badge/激光-雕刻-22c55e" alt="激光雕刻" />
+    <img src="https://img.shields.io/badge/写字机-绘图仪-3b82f6" alt="写字机" />
   </p>
   <p align="center">
     <a href="./README.md">English</a> ·
@@ -14,20 +15,57 @@
     <a href="./README.ko.md">한국어</a>
   </p>
   <p align="center">
-    <b>给要在 Web 上交付的制造与设计工具用的 CAD 画布框架。</b><br />
-    WebGPU 渲染、Float64 文档模型、接近设计工具的编辑体验 —— 需要时再接制造向 I/O。
+    <b>面向激光雕刻与写字机的 Web 软件。</b><br />
+    在 CAD 画布上设计，按图层设功率 · 速度 · 次数，导出 GRBL G-code —— 浏览器里完成从设计到下机。
   </p>
 </p>
 
 <p align="center">
-  <a href="https://tetap.github.io/cadkit/"><b>在线演示 →</b></a>
+  <a href="https://tetap.github.io/cadkit/">
+    <img src="./docs/images/playground.png" alt="CADKit Playground：激光雕刻与写字机编辑器" width="920" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://tetap.github.io/cadkit/"><b>在线 Playground →</b></a>
   &nbsp;·&nbsp;
   <a href="#快速开始">快速开始</a>
   &nbsp;·&nbsp;
   <a href="https://github.com/tetap/cadkit/tree/main/apps/docs">文档</a>
-  &nbsp;·&nbsp;
-  <a href="https://github.com/tetap/cadkit/tree/main/apps/playground">Playground</a>
 </p>
+
+---
+
+## 为什么是 CADKit
+
+多数 Web 画布只负责「画」。CADKit 是为 **二极管 / GRBL 激光** 和 **写字机（笔式绘图仪）** 做的：你编辑的文档，就是要切、雕、写的那份活。
+
+| 优势 | 你得到什么 |
+|------|------------|
+| **为加工准备的图层** | 线雕刻、填充（双向 / 交叉）、图像扫描 —— 每层独立功率、速度、次数 |
+| **照片雕刻** | 灰度 PWM、阈值、Floyd 抖动 → G-code 的 `S` 功率 |
+| **写字机友好路径** | 空走优化、碎线焊接，签名 / 单笔连续少跳刀 |
+| **真圆弧** | 圆与拟合曲线导出 **G2 / G3**，不是一堆 G1 折线 |
+| **设计工具级交互** | 钢笔、圆角矩形、布尔、偏移、弧形文字、看得见的吸附 |
+| **WebGPU + Float64** | GPU 画布、CAD 精度；不以 Canvas2D 做主渲染 |
+| **浏览器即用** | 免安装。可嵌入 `@cadkit/editor`，也可用 Playground 当桌面壳 |
+
+---
+
+## 软件设计
+
+一条链路：**画布设计 → 图层机床参数 → 导出 GRBL**。
+
+<p align="center">
+  <img src="./docs/images/design.png" alt="CADKit 软件设计：画布、图层加工、激光与写字机导出" width="920" />
+</p>
+
+- **线雕刻** — 轮廓切割 / 描边 / 落笔写字  
+- **填充** — 双向或交叉扫描，可设角度  
+- **图像** — 光栅扫描；仅透明处空走  
+- **导出** — 刀路排序、`M3` / `M5`、G0 空走、G1 / G2 / G3 运动  
+
+[I/O 文档 →](./apps/docs/guide/io.md)
 
 ---
 
@@ -47,7 +85,7 @@ Float64 权威模型、图层、编组、带孔复合路径，以及可靠的撤
 
 ### 顺手的编辑器体验
 
-对象模式变换、参数化图形手柄（矩形 / 星形）、弧形文字、标尺网格、对齐与角度吸附。
+对象模式变换、参数化图形手柄（矩形 / 星形 / 圆角）、弧形文字、标尺网格、对齐与角度吸附。
 
 [文档 →](./apps/docs/guide/interaction.md)
 
@@ -55,25 +93,19 @@ Float64 权威模型、图层、编组、带孔复合路径，以及可靠的撤
 
 并 / 差 / 交 / 异或；轮廓偏移（含编组展开）；路径编辑模式下点选与删点。
 
-[文档 →](./apps/docs/guide/interaction.md)
-
 ### 为加工准备的图层
 
 图层线雕刻 / 填充 / 图像模式，功率 · 速度 · 次数，填充预览，拖拽排序。
-
-[文档 →](./apps/docs/guide/io.md)
 
 ### 有什么导什么，切什么出什么
 
 SVG · DXF · G-code · 光栅图导入；SVG · JSON · G-code 导出 —— 导入焊接碎线、导出优化空走。
 
-[文档 →](./apps/docs/guide/io.md)
-
 **另外还有：**
 
 - **图像图层** — 导入图片落到独立图像层，与矢量层互不混拖。
-- **曲线文字** — 圆弧 / 路径文字，画布半径手柄常驻，与图形参数手柄一致。
-- **看得见的吸附** — 对象对齐、网格、角度吸附带辅助线，不是静默磁吸。
+- **曲线文字** — 圆弧 / 路径文字，画布半径手柄常驻。
+- **看得见的吸附** — 对象对齐、网格、角度吸附带辅助线。
 - **空间管线** — R-tree / BVH、显示列表缓存、LOD、WebGPU 增量更新。
 - **Playground** — 完整桌面编辑器壳（zh-CN / en-US），嵌入前可先试用。
 - **持续迭代** — 早期 API（`v0.1`）；[提交历史](https://github.com/tetap/cadkit/commits/main)即活的变更记录。
@@ -92,7 +124,7 @@ TypeScript **monorepo** —— 可按包取用，也可从编辑器门面起步�
 | **交互** | `@cadkit/interaction` · `@cadkit/text` |
 | **I/O** | `@cadkit/io-svg` · `@cadkit/io-dxf` · `@cadkit/io-gcode` · `@cadkit/assets` |
 
-吸收 [LeaferJS](https://github.com/leaferjs/leafer-ui) 的增量 / 脏区思路，以及 [Fabric.js](https://fabricjs.com/) 易用的对象与控制柄 API —— 面向 CAD 规模与制造流程重做。
+吸收 [LeaferJS](https://github.com/leaferjs/leafer-ui) 的增量 / 脏区思路，以及 [Fabric.js](https://fabricjs.com/) 易用的对象与控制柄 API —— 面向激光、写字机与 CAD 规模重做。
 
 ---
 
@@ -116,7 +148,7 @@ await editor.import.gcode(gcodeText)
 const nc = await editor.export.gcode()
 ```
 
-打开 playground：画一颗星、拖 tip / 圆角手柄、设图层填充角度，再导出 G-code。
+打开 [Playground](https://tetap.github.io/cadkit/)：画路径、把图层设成线雕刻或填充，再导出给激光或写字机的 G-code。
 
 ---
 

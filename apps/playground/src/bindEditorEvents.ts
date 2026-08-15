@@ -97,6 +97,12 @@ function readHot(editor: Editor, ids: EntityId[]): HotProps {
     hot.y = minY
     hot.width = maxX - minX
     hot.height = maxY - minY
+    if (e.type === 'polyline' && e.shape?.kind) {
+      hot.shapeKind = e.shape.kind
+      const r = e.shape.cornerRadii
+      hot.cornerRadius =
+        typeof r === 'number' ? r : Array.isArray(r) ? Math.min(...r) : 0
+    }
   }
 
   return hot

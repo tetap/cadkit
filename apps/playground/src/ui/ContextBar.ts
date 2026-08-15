@@ -1,5 +1,6 @@
 import type { BooleanOp, Editor } from '@cadkit/editor'
-import type { Entity, ImageEntity } from '@cadkit/types'
+import { rebuildShapePoints } from '@cadkit/geometry'
+import type { Entity, ImageEntity, PolylineEntity } from '@cadkit/types'
 import type { AppStore } from '../app/store.js'
 import { refreshHotFromSelection } from '../bindEditorEvents.js'
 import { t, type MessageKey } from '../i18n/index.js'
@@ -73,6 +74,17 @@ function applyGeometry(editor: Editor, store: AppStore, el: HTMLElement): void {
       { center: { x: x + rx, y: y + ry }, radiusX: rx, radiusY: ry } as Partial<Entity>,
       'ctx-ellipse',
     )
+  } else if (e.type === 'polyline' && e.shape?.kind === 'rect' && Number.isFinite(x) && Number.isFinite(y)) {
+    const nw = Number.isFinite(w) && w > 0 ? w : 1
+    const nh = Number.isFinite(h) && h > 0 ? h : 1
+    const seed = [
+      { x, y },
+      { x: x + nw, y },
+      { x: x + nw, y: y + nh },
+      { x, y: y + nh },
+    ]
+    const points = rebuildShapePoints(seed, e.shape)
+    editor.updateEntity(id, { points } as Partial<Entity>, 'ctx-poly')
   } else if (
     (e.type === 'polyline' || e.type === 'bezier') &&
     Number.isFinite(x) &&
@@ -249,6 +261,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     const showText = hot.entityType === 'text'
     const showImage = single && hot.entityType === 'image'
     const showSize = single && hot.entityType !== 'text' && hot.entityType !== null
+    const showCorner = single && (hot.shapeKind === 'rect' || hot.shapeKind === 'star')
     const geoDisabled = !single
     const canUngroup = selectionIds.some((id) => editor.document.getEntity(id)?.type === 'group')
     const canBoolean = editor.getBooleanSelection().length >= 2
@@ -281,6 +294,13 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
               </label>
               <label class="${fieldLabel}">H
                 <input type="number" id="ctx-h" class="${fieldControl} w-[4.5rem]" min="0" step="0.01" value="${fmt(hot.height)}" />
+              </label>`
+            : ''
+        }
+        ${
+          showCorner
+            ? `<label class="${fieldLabel}">${t('cornerRadius')}
+                <input type="number" id="ctx-radius" class="${fieldControl} w-[4.5rem]" min="0" step="0.1" value="${fmt(hot.cornerRadius)}" />
               </label>`
             : ''
         }
@@ -357,6 +377,18 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     for (const key of ['#ctx-x', '#ctx-y', '#ctx-w', '#ctx-h']) {
       el.querySelector(key)?.addEventListener('change', () => applyGeometry(editor, store, el))
     }
+    el.querySelector('#ctx-radius')?.addEventListener('change', (ev) => {
+      const v = Number((ev.target as HTMLInputElement).value)
+      const id = store.get().selectionIds[0]
+      if (!id || !Number.isFinite(v) || v < 0) return
+      const e = editor.document.getEntity(id)
+      if (e?.type !== 'polyline' || !e.shape) return
+      const cornerRadii = v
+      const shape = { ...e.shape, cornerRadii }
+      const points = rebuildShapePoints(e.points, shape)
+      editor.updateEntity(id, { points, shape } as Partial<PolylineEntity>, 'ctx-radius')
+      refreshHotFromSelection(editor, store)
+    })
     el.querySelector('#ctx-fs')?.addEventListener('change', (ev) => {
       const v = Number((ev.target as HTMLInputElement).value)
       const id = store.get().selectionIds[0]

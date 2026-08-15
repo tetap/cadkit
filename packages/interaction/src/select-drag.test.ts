@@ -151,6 +151,47 @@ describe('SelectTool drag', () => {
     expect(selection.has(id)).toBe(true)
   })
 
+  it('shows rect corner-radius handles in object mode', () => {
+    const doc = new CadDocument()
+    const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)
+    const camera = new Camera2D()
+    camera.setViewport(800, 600)
+    camera.setZoom(1)
+    const selection = new SelectionSet()
+    const id = createEntityId('rect')
+    scene.applyChange(
+      doc.add({
+        id,
+        type: 'polyline',
+        layerId: doc.getDefaultLayerId(),
+        style: { stroke: '#0f0' },
+        transform: IDENTITY_TRANSFORM,
+        version: 1,
+        closed: true,
+        points: [
+          { x: 0, y: 0 },
+          { x: 80, y: 0 },
+          { x: 80, y: 50 },
+          { x: 0, y: 50 },
+        ],
+        shape: { kind: 'rect', cornerRadii: 0 },
+      }),
+    )
+    const tools = new ToolManager({
+      doc,
+      camera,
+      scene,
+      selection,
+      snap: { enabled: false, pixelTolerance: 8, worldPerPixel: 1, gridSize: 10 },
+      ortho: false,
+    })
+    tools.pointerDown(screenPoint(40, 25), worldPoint(40, 25), 0)
+    tools.pointerUp(screenPoint(40, 25), worldPoint(40, 25), 0)
+    const handles = tools.getSelectionHandles()
+    expect(handles.filter((h) => h.appearance === 'corner-radius')).toHaveLength(4)
+    expect(handles.some((h) => h.id.endsWith(':corner:tl'))).toBe(true)
+  })
+
   it('opens in-place editing when double-clicking anywhere inside text bounds', () => {
     const doc = new CadDocument()
     const scene = new SceneProjector(doc, DEFAULT_PERFORMANCE_CONFIG)

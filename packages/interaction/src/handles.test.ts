@@ -141,7 +141,7 @@ describe('handles', () => {
     const handles = buildsHandlesForEntity(rect, cam)
     const tl = handles.find((h) => h.id.endsWith(':corner:tl'))
     expect(tl).toBeTruthy()
-    const pad = 10 // zoom = 1
+    const pad = 18 // zoom = 1
     expect(tl!.world.x).toBeCloseTo((15 + pad) * Math.SQRT1_2, 5)
     expect(tl!.world.y).toBeCloseTo((15 + pad) * Math.SQRT1_2, 5)
   })

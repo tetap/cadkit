@@ -140,13 +140,15 @@ export class HandleOverlay {
             ? 14
             : appearance === 'shape-param'
               ? 10
-              : isRotate
-                ? 9
-                : isScale
-                  ? 8
-                  : h.kind === 'radius'
+              : appearance === 'corner-radius'
+                ? 14
+                : isRotate
+                  ? 9
+                  : isScale
                     ? 8
-                    : 7
+                    : h.kind === 'radius'
+                      ? 8
+                      : 7
       el.style.display = 'grid'
       el.style.placeItems = 'center'
       el.style.left = `${canvasOffset.left + s.x - size / 2}px`
@@ -187,10 +189,12 @@ export class HandleOverlay {
         el.textContent = h.kind === 'center' ? '＋' : ''
         el.style.fontSize = '11px'
       } else if (appearance === 'corner-radius') {
-        el.style.border = '1.5px solid #94a3b8'
+        el.style.border = '1.5px solid #2563eb'
         el.style.background = '#fff'
-        el.style.borderRadius = '50%'
-        el.textContent = ''
+        el.style.borderRadius = '4px'
+        el.style.color = '#2563eb'
+        el.textContent = cornerGlyph(h.id)
+        el.style.fontSize = '13px'
       } else if (appearance === 'star-tips') {
         el.style.border = '1.5px solid #2563eb'
         el.style.background = '#fff'
@@ -498,4 +502,12 @@ function formatGuideDistance(world: number, _zoom: number): string {
 
 export function rotationRadToCssDegrees(rotationRad: number): number {
   return (rotationRad * 180) / Math.PI
+}
+
+function cornerGlyph(handleId: string): string {
+  if (handleId.endsWith(':tl')) return '⌜'
+  if (handleId.endsWith(':tr')) return '⌝'
+  if (handleId.endsWith(':br')) return '⌟'
+  if (handleId.endsWith(':bl')) return '⌞'
+  return '◜'
 }

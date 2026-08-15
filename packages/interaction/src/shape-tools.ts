@@ -1,5 +1,12 @@
 import { layerFillFromStroke } from '@cadkit/document'
-import { buildHeartPath, buildStarPath, boxFromCorners } from '@cadkit/geometry'
+import {
+  buildHeartPath,
+  buildStarPath,
+  boxFromCorners,
+  invert,
+  resolveWorldMatrix,
+  transformPoint,
+} from '@cadkit/geometry'
 import {
   IDENTITY_TRANSFORM,
   createEntityId,
@@ -10,6 +17,7 @@ import {
   type ScreenPoint,
   type WorldPoint,
 } from '@cadkit/types'
+import { pickEntity } from './pick.js'
 import { applyOrtho, bestSnap, collectSnaps } from './snap.js'
 import type { Tool, ToolContext, ToolName } from './tools.js'
 
@@ -395,6 +403,69 @@ export function anchorsToCubicPoints(anchors: readonly PenAnchor[], closed: bool
   return pts
 }
 
+const DEFAULT_HANDLE_EPS = 1e-4
+
+function nearLerp(h: WorldPoint, a: WorldPoint, b: WorldPoint, t: number): boolean {
+  const x = a.x + (b.x - a.x) * t
+  const y = a.y + (b.y - a.y) * t
+  return Math.hypot(h.x - x, h.y - y) <= DEFAULT_HANDLE_EPS
+}
+
+/** Unpack chained cubics (`3k+1` points) back into pen anchors. */
+export function cubicPointsToAnchors(
+  points: readonly { x: number; y: number }[],
+  closed: boolean,
+): PenAnchor[] {
+  if (points.length < 4 || (points.length - 1) % 3 !== 0) return []
+  const segs = (points.length - 1) / 3
+  const n = closed ? segs : segs + 1
+  const at = (i: number) => points[i]!
+  const anchors: PenAnchor[] = []
+  for (let i = 0; i < n; i++) {
+    const p = at(Math.min(i * 3, points.length - 1))
+    const prev = anchors[i - 1]?.point
+    const nextIdx = closed ? ((i + 1) % n) * 3 : (i + 1) * 3
+    const next = i + 1 < n || closed ? at(Math.min(nextIdx, points.length - 1)) : null
+    let handleOut: WorldPoint | null = null
+    let handleIn: WorldPoint | null = null
+    if (i < segs) {
+      const h = at(i * 3 + 1)
+      if (next && !nearLerp(worldPoint(h.x, h.y), worldPoint(p.x, p.y), worldPoint(next.x, next.y), 1 / 3)) {
+        handleOut = worldPoint(h.x, h.y)
+      }
+    }
+    if (i > 0) {
+      const h = at(i * 3 - 1)
+      if (prev && !nearLerp(worldPoint(h.x, h.y), prev, worldPoint(p.x, p.y), 2 / 3)) {
+        handleIn = worldPoint(h.x, h.y)
+      }
+    } else if (closed && segs >= 1) {
+      const h = at(points.length - 2)
+      const last = at((n - 1) * 3)
+      if (!nearLerp(worldPoint(h.x, h.y), worldPoint(last.x, last.y), worldPoint(p.x, p.y), 2 / 3)) {
+        handleIn = worldPoint(h.x, h.y)
+      }
+    }
+    anchors.push({
+      point: worldPoint(p.x, p.y),
+      handleIn,
+      handleOut,
+    })
+  }
+  return anchors
+}
+
+function reverseAnchors(anchors: readonly PenAnchor[]): PenAnchor[] {
+  return anchors
+    .slice()
+    .reverse()
+    .map((a) => ({
+      point: a.point,
+      handleIn: a.handleOut,
+      handleOut: a.handleIn,
+    }))
+}
+
 /**
  * Vector pen (Illustrator / Figma style):
  * click = corner anchor, click-drag = smooth Bezier handles,
@@ -406,10 +477,51 @@ export class PenTool implements Tool {
   /** Pointer-down placing a new anchor (may become smooth on drag). */
   private placing: { point: WorldPoint; handleOut: WorldPoint | null } | null = null
   private cursor: WorldPoint | null = null
+  /** Continue an existing open bezier instead of creating a new one. */
+  private resumeId: EntityId | null = null
+  private resumeLocalFromWorld: ((p: WorldPoint) => { x: number; y: number }) | null = null
+  /** Swallow the second click of a dblclick after resuming (same screen spot). */
+  private suppressUntil = 0
+  private suppressScreen: ScreenPoint | null = null
+  private ignoreFinish = false
+  /** Single-click on path body: wait to see if it becomes a double-click resume. */
+  private pendingPathResume: EntityId | null = null
+  private pendingTimer = 0
 
   onPointerDown(screen: ScreenPoint, world: WorldPoint, button: number, ctx: ToolContext): void {
     if (button !== 0) return
+    if (performance.now() < this.suppressUntil && this.suppressScreen) {
+      const d = Math.hypot(screen.x - this.suppressScreen.x, screen.y - this.suppressScreen.y)
+      if (d <= 12) return
+    }
+    if (this.pendingPathResume) {
+      // Second click of a dblclick on an existing path — wait for onDoubleClick.
+      return
+    }
     const p = snapWorld(ctx, world)
+    if (this.anchors.length === 0) {
+      const endHit = findOpenBezierEnd(ctx, screen)
+      if (endHit) {
+        this.applyResume(ctx, endHit.id, endHit.reverse)
+        this.suppressUntil = performance.now() + 400
+        this.suppressScreen = screen
+        this.ignoreFinish = true
+        return
+      }
+      const pathId = pickOpenBezier(ctx, screen, world)
+      if (pathId) {
+        this.pendingPathResume = pathId
+        globalThis.clearTimeout(this.pendingTimer)
+        this.pendingTimer = globalThis.setTimeout(() => {
+          if (this.pendingPathResume === pathId) {
+            ctx.selection.set([pathId])
+            ctx.onSelectionEdited?.()
+            this.pendingPathResume = null
+          }
+        }, 320)
+        return
+      }
+    }
     // Close path by clicking near the first anchor.
     if (this.anchors.length >= 3) {
       const first = this.anchors[0]!.point
@@ -419,6 +531,7 @@ export class PenTool implements Tool {
         return
       }
     }
+    this.ignoreFinish = false
     this.placing = { point: p, handleOut: null }
     this.cursor = p
     this.emitPreview(ctx)
@@ -465,14 +578,33 @@ export class PenTool implements Tool {
     this.emitPreview(ctx)
   }
 
-  onDoubleClick(_s: ScreenPoint, _w: WorldPoint, ctx: ToolContext): void {
-    // Second click of dblclick already appended an anchor — drop it, then commit.
-    if (this.anchors.length >= 2) {
-      this.anchors.pop()
-      this.commit(ctx, false)
-    } else {
-      this.cancel(ctx)
+  onDoubleClick(screen: ScreenPoint, world: WorldPoint, ctx: ToolContext): void {
+    globalThis.clearTimeout(this.pendingTimer)
+    if (this.pendingPathResume) {
+      const id = this.pendingPathResume
+      this.pendingPathResume = null
+      const end = nearestOpenBezierEnd(ctx, id, screen)
+      if (end) this.applyResume(ctx, id, end.reverse)
+      this.ignoreFinish = false
+      return
     }
+    if (this.ignoreFinish) {
+      this.ignoreFinish = false
+      return
+    }
+    if (this.anchors.length === 0) {
+      const pathId = pickOpenBezier(ctx, screen, world)
+      if (pathId) {
+        const end = nearestOpenBezierEnd(ctx, pathId, screen)
+        if (end) this.applyResume(ctx, pathId, end.reverse)
+      }
+      return
+    }
+    // Second click of dblclick already appended an extra anchor when finishing
+    // a 3+ point path — drop it. Keep both points of a 2-point finish.
+    if (this.anchors.length >= 3) this.anchors.pop()
+    if (this.anchors.length >= 2) this.commit(ctx, false)
+    else this.cancel(ctx)
   }
 
   onKeyDown(key: string, ctx: ToolContext): void {
@@ -493,10 +625,40 @@ export class PenTool implements Tool {
   }
 
   cancel(ctx: ToolContext): void {
+    globalThis.clearTimeout(this.pendingTimer)
     this.anchors = []
     this.placing = null
     this.cursor = null
+    this.resumeId = null
+    this.resumeLocalFromWorld = null
+    this.pendingPathResume = null
+    this.ignoreFinish = false
+    this.suppressUntil = 0
+    this.suppressScreen = null
     ctx.onPreview?.({ kind: 'none' })
+  }
+
+  private applyResume(ctx: ToolContext, id: EntityId, reverse: boolean): void {
+    const entity = ctx.doc.getEntity(id)
+    if (!entity || entity.type !== 'bezier' || entity.closed) return
+    const m = resolveWorldMatrix(entity, (eid) => ctx.doc.getEntity(eid))
+    const worldPts = entity.points.map((p) => {
+      const q = transformPoint(m, p)
+      return { x: q.x, y: q.y }
+    })
+    let anchors = cubicPointsToAnchors(worldPts, false)
+    if (anchors.length < 2) return
+    if (reverse) anchors = reverseAnchors(anchors)
+    const inv = invert(m)
+    this.anchors = anchors
+    this.resumeId = id
+    this.resumeLocalFromWorld = inv
+      ? (p) => transformPoint(inv, p)
+      : (p) => ({ x: p.x, y: p.y })
+    this.placing = null
+    this.cursor = anchors[anchors.length - 1]!.point
+    ctx.selection.set([id])
+    this.emitPreview(ctx)
   }
 
   private emitPreview(ctx: ToolContext): void {
@@ -538,6 +700,20 @@ export class PenTool implements Tool {
       return
     }
     const cubic = anchorsToCubicPoints(this.anchors, closed)
+    const toLocal = this.resumeLocalFromWorld
+    const points = cubic.map((p) => (toLocal ? toLocal(p) : { x: p.x, y: p.y }))
+    const resumeId = this.resumeId
+    this.anchors = []
+    this.cursor = null
+    this.resumeId = null
+    this.resumeLocalFromWorld = null
+    ctx.onPreview?.({ kind: 'none' })
+    if (resumeId && ctx.doc.getEntity(resumeId)?.type === 'bezier' && ctx.applyPatches) {
+      ctx.applyPatches(new Map([[resumeId, { points, closed }]]), `pen-resume:${String(resumeId)}`)
+      ctx.selection.set([resumeId])
+      ctx.onSelectionEdited?.()
+      return
+    }
     const entity: Entity = {
       id: createEntityId('bezier'),
       type: 'bezier',
@@ -545,14 +721,69 @@ export class PenTool implements Tool {
       style: activeLayerStyle(ctx),
       transform: IDENTITY_TRANSFORM,
       version: 1,
-      points: cubic.map((p) => ({ x: p.x, y: p.y })),
+      points,
       closed,
     }
-    this.anchors = []
-    this.cursor = null
-    ctx.onPreview?.({ kind: 'none' })
     commitEntity(ctx, entity)
   }
+}
+
+function bezierWorldEnds(
+  ctx: ToolContext,
+  entity: Extract<Entity, { type: 'bezier' }>,
+): { start: WorldPoint; end: WorldPoint } | null {
+  if (entity.points.length < 2) return null
+  const m = resolveWorldMatrix(entity, (id) => ctx.doc.getEntity(id))
+  const a = transformPoint(m, entity.points[0]!)
+  const b = transformPoint(m, entity.points[entity.points.length - 1]!)
+  return { start: worldPoint(a.x, a.y), end: worldPoint(b.x, b.y) }
+}
+
+function findOpenBezierEnd(
+  ctx: ToolContext,
+  screen: ScreenPoint,
+): { id: EntityId; reverse: boolean } | null {
+  let best: { id: EntityId; reverse: boolean; dist: number } | null = null
+  for (const e of ctx.doc.getEntities()) {
+    if (e.type !== 'bezier' || e.closed || e.style.visible === false || e.style.locked) continue
+    const ends = bezierWorldEnds(ctx, e)
+    if (!ends) continue
+    for (const [pt, reverse] of [
+      [ends.end, false],
+      [ends.start, true],
+    ] as const) {
+      const s = ctx.camera.worldToScreen(pt)
+      const d = Math.hypot(s.x - screen.x, s.y - screen.y)
+      if (d <= 10 && (!best || d < best.dist)) best = { id: e.id, reverse, dist: d }
+    }
+  }
+  return best
+}
+
+function nearestOpenBezierEnd(
+  ctx: ToolContext,
+  id: EntityId,
+  screen: ScreenPoint,
+): { reverse: boolean } | null {
+  const e = ctx.doc.getEntity(id)
+  if (!e || e.type !== 'bezier' || e.closed) return null
+  const ends = bezierWorldEnds(ctx, e)
+  if (!ends) return null
+  const se = ctx.camera.worldToScreen(ends.end)
+  const ss = ctx.camera.worldToScreen(ends.start)
+  const de = Math.hypot(se.x - screen.x, se.y - screen.y)
+  const ds = Math.hypot(ss.x - screen.x, ss.y - screen.y)
+  return { reverse: ds < de }
+}
+
+function pickOpenBezier(ctx: ToolContext, screen: ScreenPoint, world: WorldPoint): EntityId | null {
+  const id = pickEntity(ctx, world, screen)
+  if (!id) return null
+  const e = ctx.doc.getEntity(id)
+  if (!e || e.type !== 'bezier' || e.closed || e.style.visible === false || e.style.locked) {
+    return null
+  }
+  return id
 }
 
 /** Freehand brush → open polyline stroke. */

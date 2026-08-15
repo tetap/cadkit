@@ -502,7 +502,7 @@ export class SelectTool implements Tool {
               maxX: box.maxX,
               maxY: box.maxY,
               cornerId,
-              pad: 10 / Math.max(ctx.camera.getState().zoom, 1e-9),
+              pad: 18 / Math.max(ctx.camera.getState().zoom, 1e-9),
               cornerRadii: prev,
             }
           }
@@ -831,7 +831,14 @@ export class SelectTool implements Tool {
       })
       return
     }
-    if (entity.type !== 'line' && entity.type !== 'polyline' && entity.type !== 'circle') return
+    if (
+      entity.type !== 'line' &&
+      entity.type !== 'polyline' &&
+      entity.type !== 'circle' &&
+      entity.type !== 'bezier'
+    ) {
+      return
+    }
     this.enterEditMode(hit, ctx)
   }
 

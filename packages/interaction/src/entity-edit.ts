@@ -339,6 +339,48 @@ export function handleEditPatch(
       } as Partial<Entity>
     }
   }
+  if (entity.type === 'bezier') {
+    const m = /^.*:bez:(\d+)(?::(in|out))?$/.exec(handle.id)
+    if (!m) return null
+    const i = Number(m[1])
+    const which = m[2] as 'in' | 'out' | undefined
+    const pts = entity.points.map((p) => ({ x: p.x, y: p.y }))
+    if (pts.length < 4 || (pts.length - 1) % 3 !== 0) return null
+    const segs = (pts.length - 1) / 3
+    const n = entity.closed ? segs : segs + 1
+    if (i < 0 || i >= n) return null
+    if (!which) {
+      const pi = Math.min(i * 3, pts.length - 1)
+      const prev = pts[pi]!
+      const dx = local.x - prev.x
+      const dy = local.y - prev.y
+      pts[pi] = { x: local.x, y: local.y }
+      if (i < segs) {
+        const ho = pts[i * 3 + 1]!
+        pts[i * 3 + 1] = { x: ho.x + dx, y: ho.y + dy }
+      }
+      if (i > 0) {
+        const hi = pts[i * 3 - 1]!
+        pts[i * 3 - 1] = { x: hi.x + dx, y: hi.y + dy }
+      } else if (entity.closed && segs >= 1) {
+        const hi = pts[pts.length - 2]!
+        pts[pts.length - 2] = { x: hi.x + dx, y: hi.y + dy }
+        pts[pts.length - 1] = { x: local.x, y: local.y }
+      }
+      return { points: pts } as Partial<Entity>
+    }
+    if (which === 'out' && i < segs) {
+      pts[i * 3 + 1] = { x: local.x, y: local.y }
+      return { points: pts } as Partial<Entity>
+    }
+    if (which === 'in') {
+      if (i > 0) pts[i * 3 - 1] = { x: local.x, y: local.y }
+      else if (entity.closed) pts[pts.length - 2] = { x: local.x, y: local.y }
+      else return null
+      return { points: pts } as Partial<Entity>
+    }
+    return null
+  }
   if (entity.type === 'polyline' && handle.kind === 'endpoint') {
     const ref = parsePathVertexHandleId(handle.id)
     if (!ref) return null

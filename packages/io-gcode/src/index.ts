@@ -11,6 +11,7 @@ export {
   type GcodeMotion,
   type GcodeTravel,
 } from './export.js'
+export { fitPolylineArcs, type FittedSeg } from './arc-fit.js'
 export {
   importGcode,
   type GcodeImportOptions,

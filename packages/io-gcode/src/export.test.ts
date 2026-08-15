@@ -421,4 +421,67 @@ describe('exportGcode', () => {
     expect(gcode.match(/Y96\.411/g) ?? []).toHaveLength(1)
     expect((gcode.match(/^G1 /gm) ?? []).length).toBe(1)
   })
+
+  it('emits G2/G3 for circles instead of tessellated G1', () => {
+    const doc = new CadDocument()
+    const layer = doc.getDefaultLayerId()
+    doc.add({
+      id: createEntityId('circle'),
+      type: 'circle',
+      layerId: layer,
+      style: { stroke: '#111' },
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      center: { x: 10, y: 10 },
+      radius: 8,
+    })
+    const gcode = exportGcode(
+      {
+        entities: doc.getEntities(),
+        layers: doc.getLayers(),
+        getEntity: (id) => doc.getEntity(id),
+      },
+      { flipY: false, decimals: 3, optimizeOrder: false },
+    )
+    expect(gcode).toMatch(/G[23] /)
+    expect(gcode).toMatch(/I-?\d/)
+    expect(gcode).toMatch(/J-?\d/)
+    // Tessellated circle is 16+ G1 chords; arcs should be a handful of G2/G3.
+    expect((gcode.match(/^G1 /gm) ?? []).length).toBeLessThan(4)
+    expect((gcode.match(/G[23] /g) ?? []).length).toBeGreaterThanOrEqual(1)
+    const ij = [...gcode.matchAll(/I(-?[\d.]+)\s+J(-?[\d.]+)/g)]
+    expect(ij.length).toBeGreaterThanOrEqual(1)
+    for (const m of ij) {
+      const i = Number(m[1])
+      const j = Number(m[2])
+      expect(Math.hypot(i, j)).toBeCloseTo(8, 1)
+    }
+  })
+
+  it('emits G2/G3 for an open circular arc', () => {
+    const doc = new CadDocument()
+    const layer = doc.getDefaultLayerId()
+    doc.add({
+      id: createEntityId('arc'),
+      type: 'arc',
+      layerId: layer,
+      style: { stroke: '#111' },
+      transform: IDENTITY_TRANSFORM,
+      version: 1,
+      center: { x: 0, y: 0 },
+      radius: 10,
+      startAngle: 0,
+      endAngle: Math.PI / 2,
+    })
+    const gcode = exportGcode(
+      {
+        entities: doc.getEntities(),
+        layers: doc.getLayers(),
+        getEntity: (id) => doc.getEntity(id),
+      },
+      { flipY: false, decimals: 3, optimizeOrder: false },
+    )
+    expect(gcode).toMatch(/G[23] /)
+    expect(gcode).toMatch(/I-?\d/)
+  })
 })

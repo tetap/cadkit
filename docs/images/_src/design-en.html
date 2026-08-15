@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CADKit Design</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 1440px; height: 860px; overflow: hidden; font-family: 'DM Sans', sans-serif; background: #0f172a; color: #e2e8f0; }
+      body { padding: 48px 56px; }
+      h1 { font-family: Outfit, sans-serif; font-size: 36px; letter-spacing: -0.03em; }
+      .sub { margin-top: 8px; color: #94a3b8; font-size: 16px; }
+      .pills { display: flex; gap: 8px; margin: 22px 0 36px; }
+      .pill { padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+      .g { background: #166534; color: #bbf7d0; }
+      .b { background: #1e3a5f; color: #93c5fd; }
+      .a { background: #3f2a14; color: #fcd34d; }
+      .row { display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 20px; }
+      .card { background: #1e293b; border: 1px solid #334155; border-radius: 18px; padding: 22px; min-height: 520px; }
+      .card h2 { font-family: Outfit, sans-serif; font-size: 18px; margin-bottom: 6px; }
+      .card p { color: #94a3b8; font-size: 13px; line-height: 1.5; margin-bottom: 18px; }
+      .canvas { height: 280px; border-radius: 12px; background: #f8fafc; position: relative; overflow: hidden; }
+      .canvas svg { width: 100%; height: 100%; }
+      .list { display: flex; flex-direction: column; gap: 10px; }
+      .item { display: flex; justify-content: space-between; align-items: center; background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 12px 14px; font-size: 13px; }
+      .item b { color: #f8fafc; }
+      .item span { color: #86efac; font-size: 12px; }
+      .machine { height: 168px; border-radius: 12px; background: linear-gradient(180deg, #111827, #0b1220); border: 1px solid #334155; display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }
+      .head { width: 54px; height: 54px; border-radius: 14px; display: grid; place-items: center; font-size: 22px; }
+      .laser { background: #14532d; box-shadow: 0 0 28px #22c55e88; }
+      .pen { background: #1e3a8a; box-shadow: 0 0 28px #60a5fa66; }
+      .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.7; color: #86efac; background: #020617; border-radius: 10px; padding: 12px 14px; border: 1px solid #1e293b; }
+    </style>
+  </head>
+  <body>
+    <h1>Built for laser engraving &amp; pen plotters</h1>
+    <p class="sub">One canvas: draw paths, set per-layer power / speed, export GRBL G-code. Design to machine — in the browser.</p>
+    <div class="pills">
+      <div class="pill g">Laser · line / fill / image</div>
+      <div class="pill b">Plotter · travel-optimized paths</div>
+      <div class="pill a">WebGPU · Float64 · G2/G3</div>
+    </div>
+    <div class="row">
+      <section class="card">
+        <h2>1. Design on the canvas</h2>
+        <p>Pen, text, boolean, offset, rounded rects. Object handles and snaps that feel like a design tool.</p>
+        <div class="canvas">
+          <svg viewBox="0 0 420 280">
+            <rect width="420" height="280" fill="#f8fafc"/>
+            <g stroke="#e2e8f0" stroke-width="1">
+              <path d="M0 70h420M0 140h420M0 210h420M70 0v280M140 0v280M210 0v280M280 0v280M350 0v280"/>
+            </g>
+            <rect x="48" y="42" width="170" height="110" rx="18" fill="#2563eb22" stroke="#2563eb" stroke-width="2"/>
+            <path d="M280 78c-12-20-40-16-48 6-8-22-36-26-48-6-16 24 6 54 48 82 42-28 64-58 48-82Z" fill="#ef4444"/>
+            <text x="52" y="210" font-family="Outfit" font-size="28" font-weight="700" fill="#0f172a">CADKit</text>
+            <text x="52" y="238" font-family="DM Sans" font-size="13" fill="#64748b">Vector paths · stroke or fill</text>
+          </svg>
+        </div>
+      </section>
+      <section class="card">
+        <h2>2. Machine params per layer</h2>
+        <p>Line engrave, hatch fill, grayscale PWM images. Independent power, speed, and passes.</p>
+        <div class="list">
+          <div class="item"><b>Outline</b><span>Line · S800 · 3000</span></div>
+          <div class="item"><b>Text</b><span>Fill 45° · cross-hatch</span></div>
+          <div class="item"><b>Photo</b><span>Image · grayscale PWM</span></div>
+          <div class="item"><b>Signature</b><span>Plotter · single stroke</span></div>
+        </div>
+      </section>
+      <section class="card">
+        <h2>3. Export to the machine</h2>
+        <p>GRBL G-code with travel optimization, G2/G3 arcs, laser M3 or pen-down.</p>
+        <div class="machine">
+          <div style="display:flex;gap:28px;align-items:center">
+            <div style="text-align:center">
+              <div class="head laser">✦</div>
+              <div style="margin-top:8px;font-size:12px;color:#86efac">Laser</div>
+            </div>
+            <div style="width:1px;height:64px;background:#334155"></div>
+            <div style="text-align:center">
+              <div class="head pen">✎</div>
+              <div style="margin-top:8px;font-size:12px;color:#93c5fd">Plotter</div>
+            </div>
+          </div>
+        </div>
+        <div class="code">G21 G90<br/>G0 X12.40 Y8.10<br/>M3 S800<br/>G1 X48.20 F3000<br/>G2 X62.00 Y22.00 I8.00 J6.00<br/>M5</div>
+      </section>
+    </div>
+  </body>
+</html>

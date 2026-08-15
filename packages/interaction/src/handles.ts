@@ -281,6 +281,54 @@ export function buildsHandlesForEntity(
         label: formatSweepLabel(entity.startAngle, entity.endAngle),
       })
     }
+  } else if (entity.type === 'bezier') {
+    const pts = entity.points
+    if (pts.length >= 4 && (pts.length - 1) % 3 === 0) {
+      const segs = (pts.length - 1) / 3
+      const n = entity.closed ? segs : segs + 1
+      for (let i = 0; i < n; i++) {
+        const p = pts[Math.min(i * 3, pts.length - 1)]!
+        handles.push({
+          id: `${entity.id}:bez:${i}`,
+          entityId: entity.id,
+          kind: 'endpoint',
+          world: toWorldPoint(m, p),
+          cursor: 'move',
+        })
+        if (i < segs) {
+          const h = pts[i * 3 + 1]!
+          handles.push({
+            id: `${entity.id}:bez:${i}:out`,
+            entityId: entity.id,
+            kind: 'radius',
+            world: toWorldPoint(m, h),
+            cursor: 'crosshair',
+            appearance: 'shape-param',
+          })
+        }
+        if (i > 0) {
+          const h = pts[i * 3 - 1]!
+          handles.push({
+            id: `${entity.id}:bez:${i}:in`,
+            entityId: entity.id,
+            kind: 'radius',
+            world: toWorldPoint(m, h),
+            cursor: 'crosshair',
+            appearance: 'shape-param',
+          })
+        } else if (entity.closed && segs >= 1) {
+          const h = pts[pts.length - 2]!
+          handles.push({
+            id: `${entity.id}:bez:0:in`,
+            entityId: entity.id,
+            kind: 'radius',
+            world: toWorldPoint(m, h),
+            cursor: 'crosshair',
+            appearance: 'shape-param',
+          })
+        }
+      }
+    }
   } else if (entity.type === 'polyline') {
     const shape = entity.shape
     if (shape?.kind === 'rect' && entity.closed) {
@@ -301,7 +349,7 @@ export function buildsHandlesForEntity(
               bl: Math.max(0, radii[3] ?? 0),
             }
       // Keep a visible pad when radius is 0 so the control clears scale corners.
-      const minPad = 10 / Math.max(camera.getState().zoom, 1e-9)
+      const minPad = 18 / Math.max(camera.getState().zoom, 1e-9)
       const ids: RectCornerId[] = ['tl', 'tr', 'br', 'bl']
       for (const id of ids) {
         handles.push({

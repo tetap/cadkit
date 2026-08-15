@@ -161,6 +161,7 @@ export type MessageKey =
   | 'stroke'
   | 'fill'
   | 'fontSize'
+  | 'cornerRadius'
   | 'arcText'
   | 'arcRadius'
   | 'arcStart'
@@ -283,7 +284,7 @@ const zh: Record<MessageKey, string> = {
   tipEllipse: '快捷键 O · 拖拽绘制椭圆',
   tipCircle: '快捷键 C · 点击圆心再定半径',
   tipPolyline: '快捷键 P · 多点折线，Enter 完成',
-  tipPen: '快捷键 B · 单击锚点，拖拽出贝塞尔手柄；Enter 完成，点起点闭合',
+  tipPen: '快捷键 B · 单击锚点，拖拽出贝塞尔手柄；Enter / 双击完成；点端点或双击路径继续编辑',
   tipBrush: '快捷键 W · 按住拖拽自由绘制',
   tipText: '快捷键 T · 点击画布输入文字',
   tipImage: '快捷键 I · 选工具后选文件，再点击画布放置；也支持拖放',
@@ -422,6 +423,7 @@ const zh: Record<MessageKey, string> = {
   stroke: '描边',
   fill: '填充',
   fontSize: '字号',
+  cornerRadius: '圆角',
   arcText: '圆弧文字',
   arcRadius: '半径',
   arcStart: '起始角°',
@@ -546,7 +548,7 @@ const en: Record<MessageKey, string> = {
   tipEllipse: 'Shortcut O · drag to draw an ellipse',
   tipCircle: 'Shortcut C · click center, then set radius',
   tipPolyline: 'Shortcut P · multi-point polyline, Enter to finish',
-  tipPen: 'Shortcut B · click anchors, drag for Bezier handles; Enter to finish, click start to close',
+  tipPen: 'Shortcut B · click anchors, drag for Bezier handles; Enter / double-click to finish; click an end or double-click a path to continue',
   tipBrush: 'Shortcut W · click-drag freehand strokes',
   tipText: 'Shortcut T · click the canvas to type text',
   tipImage: 'Shortcut I · pick a file, then click the canvas to place; drag & drop also works',
@@ -685,6 +687,7 @@ const en: Record<MessageKey, string> = {
   stroke: 'Stroke',
   fill: 'Fill',
   fontSize: 'Font size',
+  cornerRadius: 'Radius',
   arcText: 'Arc text',
   arcRadius: 'Radius',
   arcStart: 'Start °',
