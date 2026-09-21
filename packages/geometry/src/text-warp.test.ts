@@ -34,6 +34,40 @@ describe('text warp', () => {
     expect(end.y).toBeCloseTo(20, 5)
   })
 
+  it('crown / flag at 50% lifts the midline by a visible fraction of height', () => {
+    const mid = warpPoint({ x: 50, y: 20 }, box, { style: 'flag', bend: 0.5 })
+    expect(20 - mid.y).toBeGreaterThan(8)
+  })
+
+  it('crown / flag grows glyph height in the middle (envelope, not a mere shift)', () => {
+    const warp = { style: 'flag' as const, bend: 0.5 }
+    const midTop = warpPoint({ x: 50, y: 0 }, box, warp)
+    const midBot = warpPoint({ x: 50, y: 40 }, box, warp)
+    const endTop = warpPoint({ x: 0, y: 0 }, box, warp)
+    const endBot = warpPoint({ x: 0, y: 40 }, box, warp)
+    const midH = Math.abs(midBot.y - midTop.y)
+    const endH = Math.abs(endBot.y - endTop.y)
+    expect(midH).toBeGreaterThan(endH * 1.15)
+  })
+
+  it('flag + horizontal perspective makes the right-of-center peak taller', () => {
+    const mild = warpPoint({ x: 80, y: 0 }, box, { style: 'flag', bend: 1, distortH: 0 })
+    const persp = warpPoint({ x: 80, y: 0 }, box, { style: 'flag', bend: 1, distortH: 1 })
+    expect(persp.y).toBeLessThan(mild.y - 8)
+  })
+
+  it('flag + H persp keeps the far-right end shorter than the mid-right peak', () => {
+    const peak = warpPoint({ x: 70, y: 0 }, box, { style: 'flag', bend: 1, distortH: 1 })
+    const tail = warpPoint({ x: 100, y: 0 }, box, { style: 'flag', bend: 1, distortH: 1 })
+    expect(peak.y).toBeLessThan(tail.y - 4)
+  })
+
+  it('flag + H persp does not crush the left side to a sliver', () => {
+    const leftTop = warpPoint({ x: 0, y: 0 }, box, { style: 'flag', bend: 1, distortH: 1 })
+    const leftBot = warpPoint({ x: 0, y: 40 }, box, { style: 'flag', bend: 1, distortH: 1 })
+    expect(Math.abs(leftBot.y - leftTop.y)).toBeGreaterThan(12)
+  })
+
   it('horizontal perspective stretches the right side', () => {
     const right = warpPoint({ x: 100, y: 0 }, box, {
       style: 'arch',

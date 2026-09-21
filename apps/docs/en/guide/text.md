@@ -4,3 +4,4 @@
 - Production path: HarfBuzz + FreeType WASM (`@cadkit/wasm` ABI)
 - Render modes: `placeholder` / `msdf` / `outline`
 - Editing: `ImeTextEditor` hidden textarea proxy with IME support
+- Envelope warp (arc / flag / wave, …): see [Text Warp](./text-warp.md)
