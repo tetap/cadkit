@@ -7,6 +7,7 @@ import { t, type MessageKey } from '../i18n/index.js'
 import { openCurveTextDialog } from './CurveTextDialog.js'
 import { ICONS } from './icons.js'
 import { openOffsetDialog } from './OffsetDialog.js'
+import { openTextWarpDialog } from './TextWarpDialog.js'
 import { btnGhost, fieldControl, fieldLabel } from './tokens.js'
 
 const BOOL_OPS: Array<{ op: BooleanOp; label: MessageKey; tip: MessageKey }> = [
@@ -139,6 +140,8 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
   let offsetOpen = false
   let disposeCurve: (() => void) | null = null
   let curveOpen = false
+  let disposeWarp: (() => void) | null = null
+  let warpOpen = false
   /** Currently open toolbar dropdown id (`bool` | `mirror`), or null. */
   let openMenu: 'bool' | 'mirror' | null = null
   let floatingMenu: HTMLElement | null = null
@@ -153,6 +156,11 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     disposeCurve?.()
     disposeCurve = null
     curveOpen = false
+  }
+  const closeWarp = () => {
+    disposeWarp?.()
+    disposeWarp = null
+    warpOpen = false
   }
 
   const closeMenus = () => {
@@ -181,6 +189,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     }
     closeOffset()
     closeCurve()
+    closeWarp()
     closeMenus()
     openMenu = kind
     const menu = document.createElement('div')
@@ -271,6 +280,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
     if (disabled) {
       closeOffset()
       closeCurve()
+      closeWarp()
       closeMenus()
       el.innerHTML = ''
       el.hidden = true
@@ -316,6 +326,13 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
                   <path d="M5 12.5h0.1M8 9.5h0.1M12 9.5h0.1M15 12.5h0.1" stroke-linecap="round"/>
                 </svg>
                 ${t('curveText')}
+              </button>
+              <button type="button" id="ctx-warp" class="${btnGhost} gap-1.5 ${hot.textWarp ? '!border-brand-dark !bg-brand/15 !text-brand-dark' : ''}" title="${t('textWarp')}">
+                <svg viewBox="0 0 20 20" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                  <path d="M3.5 14c2.2-6 4.4 2 6.6-2.5S14.4 6 16.5 12"/>
+                  <path d="M3.5 6c2.2 4 4.4-1 6.6 2S14.4 14 16.5 8" opacity=".55"/>
+                </svg>
+                ${t('textWarp')}
               </button>`
             : ''
         }
@@ -400,6 +417,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
       const id = store.get().selectionIds[0]
       if (!id || store.get().hot.entityType !== 'text') return
       closeOffset()
+      closeWarp()
       closeMenus()
       if (curveOpen) {
         closeCurve()
@@ -411,6 +429,25 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
       disposeCurve = openCurveTextDialog(host, editor, id, () => {
         disposeCurve = null
         curveOpen = false
+        refreshHotFromSelection(editor, store)
+      })
+    })
+    el.querySelector('#ctx-warp')?.addEventListener('click', () => {
+      const id = store.get().selectionIds[0]
+      if (!id || store.get().hot.entityType !== 'text') return
+      closeOffset()
+      closeCurve()
+      closeMenus()
+      if (warpOpen) {
+        closeWarp()
+        return
+      }
+      warpOpen = true
+      const host = el.querySelector('.pointer-events-auto') as HTMLElement | null
+      if (!host) return
+      disposeWarp = openTextWarpDialog(host, editor, id, () => {
+        disposeWarp = null
+        warpOpen = false
         refreshHotFromSelection(editor, store)
       })
     })
@@ -427,6 +464,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
         return
       }
       closeCurve()
+      closeWarp()
       closeMenus()
       if (offsetOpen) {
         closeOffset()
@@ -464,6 +502,7 @@ export function mountContextBar(el: HTMLElement, editor: Editor, store: AppStore
   return () => {
     closeOffset()
     closeCurve()
+    closeWarp()
     closeMenus()
     unsub()
   }

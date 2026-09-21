@@ -65,6 +65,7 @@ function readHot(editor: Editor, ids: EntityId[]): HotProps {
     hot.x = te.position.x
     hot.y = te.position.y
     hot.arcText = te.path?.kind === 'arc'
+    hot.textWarp = !!te.warp
   } else if (e.type === 'image') {
     const img = e as ImageEntity
     hot.x = img.origin.x

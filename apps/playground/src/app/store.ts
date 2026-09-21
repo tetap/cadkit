@@ -15,6 +15,8 @@ export interface HotProps {
   entityType: string | null
   /** TextEntity has arc path. */
   arcText: boolean
+  /** TextEntity has envelope warp. */
+  textWarp: boolean
   /** Parametric polyline (`rect` / `star` / `heart`). */
   shapeKind: 'rect' | 'star' | 'heart' | null
   /** Uniform corner radius for rect / star fillet. */
@@ -77,6 +79,7 @@ export const DEFAULT_HOT: HotProps = {
   fontSize: 16,
   entityType: null,
   arcText: false,
+  textWarp: false,
   shapeKind: null,
   cornerRadius: 0,
 }

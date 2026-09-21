@@ -173,6 +173,31 @@ export interface TextEntity extends EntityBase {
   align?: 'left' | 'center' | 'right'
   /** When set, glyphs are laid out along a curve (arc in v1). */
   path?: TextArcPath
+  /** Photoshop-style envelope warp applied to glyph outlines. */
+  warp?: TextWarp
+}
+
+/** Preset envelope used by text warp (Photoshop / CorelDRAW-style). */
+export type TextWarpStyle =
+  | 'arc'
+  | 'arcLower'
+  | 'arcUpper'
+  | 'arch'
+  | 'bulge'
+  | 'shell'
+  | 'flag'
+  | 'wave'
+
+export interface TextWarp {
+  style: TextWarpStyle
+  /** Warp along X (default) or swap axes first. */
+  direction?: 'horizontal' | 'vertical'
+  /** Bend / intensity in [-1, 1]. UI typically shows percent. */
+  bend: number
+  /** Horizontal perspective in [-1, 1]. */
+  distortH?: number
+  /** Vertical perspective in [-1, 1]. */
+  distortV?: number
 }
 
 export interface DimensionEntity extends EntityBase {

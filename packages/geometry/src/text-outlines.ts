@@ -10,6 +10,7 @@
 import type { TextEntity, Vec2 } from '@cadkit/types'
 import { layoutArcText } from './arc-text.js'
 import { measureTextLine } from './text-metrics.js'
+import { isIdentityWarp, warpBoxFromPoints, warpContours } from './text-warp.js'
 
 export interface TextOutlineContour {
   points: Vec2[]
@@ -25,10 +26,10 @@ const TARGET_EM_PX = 96
  */
 const outlineCache = new Map<
   string,
-  { sig: string; relative: TextOutlineContour[] }
+  { layoutSig: string; relative: TextOutlineContour[] }
 >()
 
-function outlineSignature(entity: TextEntity): string {
+function layoutSignature(entity: TextEntity): string {
   return JSON.stringify({
     c: entity.content,
     ff: entity.fontFamily || 'sans-serif',
@@ -114,35 +115,48 @@ export function textEntityToLocalOutlines(
 ): TextOutlineContour[] {
   if (!entity.content) return []
 
-  const sig = outlineSignature(entity)
+  const layoutSig = layoutSignature(entity)
   const cacheKey = String(entity.id)
   const hit = outlineCache.get(cacheKey)
-  if (hit && hit.sig === sig && !opts?.pixelsPerEm) {
-    return shiftContours(hit.relative, entity.position.x, entity.position.y)
+
+  let absolute: TextOutlineContour[] | null = null
+  if (hit && hit.layoutSig === layoutSig && !opts?.pixelsPerEm) {
+    absolute = shiftContours(hit.relative, entity.position.x, entity.position.y)
+  } else {
+    const canvas = getCanvas()
+    if (!canvas) return []
+    const ctx = get2d(canvas)
+    if (!ctx) return []
+
+    const css = fontCss(entity.fontSize, entity.fontFamily || 'sans-serif')
+    ensureFontLoaded(css)
+
+    absolute =
+      entity.path?.kind === 'arc'
+        ? outlineArcText(entity, canvas, ctx, opts)
+        : outlineStraightText(entity, canvas, ctx, opts)
+
+    // Only cache default-resolution outlines once the face is ready. Caching a
+    // fallback raster permanently desyncs preview from the DOM TextOverlay.
+    if (!opts?.pixelsPerEm && absolute.length && isFontReady(css)) {
+      outlineCache.set(cacheKey, {
+        layoutSig,
+        relative: shiftContours(absolute, -entity.position.x, -entity.position.y),
+      })
+    }
   }
 
-  const canvas = getCanvas()
-  if (!canvas) return []
-  const ctx = get2d(canvas)
-  if (!ctx) return []
+  return applyTextWarp(absolute, entity.warp)
+}
 
-  const css = fontCss(entity.fontSize, entity.fontFamily || 'sans-serif')
-  ensureFontLoaded(css)
-
-  const absolute =
-    entity.path?.kind === 'arc'
-      ? outlineArcText(entity, canvas, ctx, opts)
-      : outlineStraightText(entity, canvas, ctx, opts)
-
-  // Only cache default-resolution outlines once the face is ready. Caching a
-  // fallback raster permanently desyncs preview from the DOM TextOverlay.
-  if (!opts?.pixelsPerEm && absolute.length && isFontReady(css)) {
-    outlineCache.set(cacheKey, {
-      sig,
-      relative: shiftContours(absolute, -entity.position.x, -entity.position.y),
-    })
-  }
-  return absolute
+function applyTextWarp(
+  contours: TextOutlineContour[],
+  warp: TextEntity['warp'],
+): TextOutlineContour[] {
+  if (!warp || isIdentityWarp(warp) || contours.length === 0) return contours
+  const box = warpBoxFromPoints(contours.flatMap((c) => c.points))
+  if (!box) return contours
+  return warpContours(contours, box, warp)
 }
 
 /** Drop cached outlines (tests / document reload). */

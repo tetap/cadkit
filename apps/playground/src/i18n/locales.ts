@@ -104,6 +104,24 @@ export type MessageKey =
   | 'curveText'
   | 'curveTextEnable'
   | 'curveTextHint'
+  | 'textWarp'
+  | 'textWarpEnable'
+  | 'textWarpStyle'
+  | 'textWarpDir'
+  | 'textWarpDirH'
+  | 'textWarpDirV'
+  | 'textWarpBend'
+  | 'textWarpDistortH'
+  | 'textWarpDistortV'
+  | 'textWarpRelease'
+  | 'textWarpArc'
+  | 'textWarpArcLower'
+  | 'textWarpArcUpper'
+  | 'textWarpArch'
+  | 'textWarpBulge'
+  | 'textWarpShell'
+  | 'textWarpFlag'
+  | 'textWarpWave'
   | 'settings'
   | 'settingsDocument'
   | 'settingsGuides'
@@ -366,6 +384,24 @@ const zh: Record<MessageKey, string> = {
   curveText: '曲线文本',
   curveTextEnable: '沿圆弧排布',
   curveTextHint: '开启后以文字中心为基准生成默认半径圆弧，字串中点落在弧顶；半径、起止角可调。',
+  textWarp: '变形',
+  textWarpEnable: '启用文字变形',
+  textWarpStyle: '样式',
+  textWarpDir: '方向',
+  textWarpDirH: '水平',
+  textWarpDirV: '垂直',
+  textWarpBend: '变形强度(%)',
+  textWarpDistortH: '水平透视(%)',
+  textWarpDistortV: '垂直透视(%)',
+  textWarpRelease: '释放',
+  textWarpArc: '扇形',
+  textWarpArcLower: '下弧形',
+  textWarpArcUpper: '上弧形',
+  textWarpArch: '拱形',
+  textWarpBulge: '凸出形',
+  textWarpShell: '贝壳',
+  textWarpFlag: '花冠',
+  textWarpWave: '波浪形',
   settings: '设置',
   settingsDocument: '文档',
   settingsGuides: '辅助显示',
@@ -630,6 +666,24 @@ const en: Record<MessageKey, string> = {
   curveText: 'Curve text',
   curveTextEnable: 'Follow arc',
   curveTextHint: 'Places an arc around the text center (midpoint on the apex). Radius and angles are adjustable.',
+  textWarp: 'Warp',
+  textWarpEnable: 'Enable text warp',
+  textWarpStyle: 'Style',
+  textWarpDir: 'Direction',
+  textWarpDirH: 'Horizontal',
+  textWarpDirV: 'Vertical',
+  textWarpBend: 'Bend (%)',
+  textWarpDistortH: 'Horizontal distort (%)',
+  textWarpDistortV: 'Vertical distort (%)',
+  textWarpRelease: 'Release',
+  textWarpArc: 'Arc',
+  textWarpArcLower: 'Arc lower',
+  textWarpArcUpper: 'Arc upper',
+  textWarpArch: 'Arch',
+  textWarpBulge: 'Bulge',
+  textWarpShell: 'Shell',
+  textWarpFlag: 'Crown',
+  textWarpWave: 'Wave',
   settings: 'Settings',
   settingsDocument: 'Document',
   settingsGuides: 'Guides',

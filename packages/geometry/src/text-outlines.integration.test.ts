@@ -141,6 +141,25 @@ describe('text outlines integration (fake canvas)', () => {
     expect(dy).toBeCloseTo(35, 5)
   })
 
+  it('applies envelope warp after raster so the ink box changes', () => {
+    restore = installFakeCanvas()
+    const e = text({
+      content: 'Warp',
+      position: { x: 0, y: 40 },
+      fontSize: 20,
+      align: 'center',
+    })
+    const flat = textEntityToLocalOutlines(e, { pixelsPerEm: 6 })
+    const warped = textEntityToLocalOutlines(
+      { ...e, warp: { style: 'arc', bend: 0.7 } },
+      { pixelsPerEm: 6 },
+    )
+    expect(warped.length).toBeGreaterThanOrEqual(1)
+    const flatYs = flat.flatMap((c) => c.points.map((p) => p.y))
+    const warpYs = warped.flatMap((c) => c.points.map((p) => p.y))
+    expect(Math.min(...warpYs)).toBeLessThan(Math.min(...flatYs) - 1)
+  })
+
   it('returns [] without canvas (fallback path stays available)', () => {
     const e = text({
       content: 'NoCanvas',
